@@ -111,11 +111,11 @@ export function createMcpServer(ctx: Ctx): McpServer {
         const w = workspaceOf(ctx.cfg, s.cwd)!;
         const owned = ctx.pool.isOwned(s.sessionId);
         const d = deriveState([], { isLocked: s.isLocked, updatedAt: s.updatedAt });
-        ctx.events.setTitle(s.sessionId, s.title);
+        if (s.title) ctx.events.setTitle(s.sessionId, s.title);
         const live = ctx.events.live(s.sessionId);
         return {
           handle: ctx.handles.sessionHandle(s.sessionId),
-          title: s.title,
+          title: s.title || live.title,
           workspace: { handle: ctx.handles.workspaceHandle(w), name: basename(w) },
           state: owned ? "running" : d.state,
           isLocked: s.isLocked,
@@ -293,6 +293,7 @@ export function createMcpServer(ctx: Ctx): McpServer {
     const sessionId = ctx.handles.sessionIdFor(session);
     if (!sessionId) return errorResult(`unknown session handle: ${session}`);
     const { events, nextSince } = ctx.events.list(sessionId, since ?? 0, limit ?? 50);
+    const title = await ctx.twin.resolveTitle(sessionId);
     const live = ctx.events.live(sessionId);
     const fmt = new Intl.DateTimeFormat("pt-BR", {
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -301,7 +302,7 @@ export function createMcpServer(ctx: Ctx): McpServer {
     });
     return toJson({
       handle: session,
-      title: live.title,
+      title: title ?? live.title,
       live,
       events,
       nextSince,

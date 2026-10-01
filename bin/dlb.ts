@@ -97,7 +97,7 @@ async function cmdSetup(args: string[]): Promise<void> {
   const provider =
     (values.tunnel as TunnelProvider | undefined) ??
     prev?.tunnel.provider ??
-    ((await ask("Tunnel provider (quick|tailscale|cloudflare|none)", "quick")) as TunnelProvider);
+    ((await ask("Tunnel provider (tailscale|quick|cloudflare|none)", "tailscale")) as TunnelProvider);
   if (!VALID_PROVIDERS.includes(provider)) die(`invalid tunnel provider: ${provider}`);
 
   const cfg: CliConfig = {

@@ -4,6 +4,7 @@ import { execSync } from "node:child_process";
 import { hostname as osHostname } from "node:os";
 import type { DevinApi } from "./api.ts";
 import type { PushConfig } from "../push.ts";
+import type { EventStore } from "../events.ts";
 import { push } from "../push.ts";
 import { audit } from "../audit.ts";
 
@@ -51,7 +52,13 @@ export class TwinManager {
     private file: string,
     private api: DevinApi | null,
     private pushCfg: PushConfig,
-    private opts: { maxAcuLimit: number; archiveOnEnd: boolean; isRemoteOn: () => boolean },
+    private opts: {
+      maxAcuLimit: number;
+      archiveOnEnd: boolean;
+      isRemoteOn: () => boolean;
+      events?: EventStore;
+      lookupTitle?: (sid: string) => Promise<string | null>;
+    },
   ) {
     try {
       if (existsSync(file)) this.twins = JSON.parse(readFileSync(file, "utf8"));
@@ -65,6 +72,28 @@ export class TwinManager {
 
   list(): Record<string, TwinRec> {
     return this.twins;
+  }
+
+  // Title resolution: live/cached title → ACP session list → first user prompt.
+  // refresh=true re-runs the ACP lookup (late-set titles land on stop/session_end).
+  async resolveTitle(sid: string, refresh = false): Promise<string | null> {
+    const ev = this.opts.events;
+    const live = ev?.live(sid);
+    if (!refresh && live?.title) return live.title;
+    if (this.opts.lookupTitle && ev) {
+      try {
+        const t = await this.opts.lookupTitle(sid);
+        if (t && t.trim()) {
+          ev.setTitle(sid, t.trim());
+          return t.trim();
+        }
+      } catch {}
+    }
+    if (live?.title) return live.title;
+    const first = ev?.list(sid, 0, 500).events.find((e) => e.kind === "user_prompt");
+    const prompt = first ? String(first.data.prompt ?? "") : "";
+    const clean = prompt.replace(/[`\n\r]+/g, " ").replace(/\s+/g, " ").trim();
+    return clean ? (clean.length > 60 ? clean.slice(0, 60) + "…" : clean) : null;
   }
 
   async archive(localSessionId: string): Promise<boolean> {
@@ -99,7 +128,9 @@ export class TwinManager {
     if (existing && !existing.archived) return existing;
     if (!this.api || !this.opts.isRemoteOn()) return null;
     const host = localHostName();
-    const title = meta.title || (meta.cwd ? basename(meta.cwd) : sessionId);
+    const title =
+      meta.title || (await this.resolveTitle(sessionId)) ||
+      (meta.cwd ? basename(meta.cwd) : sessionId);
     try {
       const prompt = NARRATOR.replace("{HANDLE}", meta.handle)
         .replace("{TITLE}", title)
@@ -138,13 +169,15 @@ export class TwinManager {
     meta: { title?: string | null; cwd?: string | null; handle: string },
   ): Promise<void> {
     if (!this.opts.isRemoteOn()) return;
-    const twin = await this.ensureTwin(sessionId, meta);
+    const refresh = kind === "stop" || kind === "session_end";
+    const title = (await this.resolveTitle(sessionId, refresh)) ?? meta.title;
+    const twin = await this.ensureTwin(sessionId, { ...meta, title });
     if (!twin) return;
     const host = localHostName();
 
     void push(this.pushCfg, {
       host,
-      title: meta.title ?? sessionId,
+      title: title ?? sessionId,
       body: headline,
       click: twin.url,
       kind,

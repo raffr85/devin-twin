@@ -35,6 +35,9 @@ const twin = new TwinManager(
     maxAcuLimit: cliCfg?.twin.maxAcuLimit ?? 2,
     archiveOnEnd: cliCfg?.twin.archiveOnEnd ?? true,
     isRemoteOn: () => readRemote().on,
+    events,
+    lookupTitle: async (sid) =>
+      (await pool.listSessions()).find((s) => s.sessionId === sid)?.title ?? null,
   },
 );
 

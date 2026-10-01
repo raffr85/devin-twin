@@ -45,6 +45,7 @@ async function hook(event: string, body: unknown, headers: Record<string, string
 
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "dlb-hooks-"));
+  process.env.DLB_STATE_DIR = dir;
   wsDir = join(dir, "ws");
   process.env.FAKE_CWD = wsDir;
   cfg = loadConfig({
@@ -64,6 +65,8 @@ beforeAll(() => {
     maxAcuLimit: 2,
     archiveOnEnd: true,
     isRemoteOn: () => remote.on,
+    events,
+    lookupTitle: async () => null,
   });
   const handles = new HandleMap();
   const hooks = new HookRuntime(events, queue, twin, handles, () => remote, 400);
@@ -282,6 +285,8 @@ test("twin manager: creates once, coalesces, immediate permission, archives", as
     maxAcuLimit: 2,
     archiveOnEnd: true,
     isRemoteOn: () => remoteState.on,
+    events: new EventStore(join(dir, "ev-twin")),
+    lookupTitle: async () => null,
   });
   const meta = { title: "T", cwd: "/tmp/x", handle: "s_1" };
   await tm.trigger("s1", "turno iniciado: a", "user_prompt", meta);
@@ -359,4 +364,70 @@ test("hooks install merges into devin config preserving keys; status/uninstall w
   const cfg3 = JSON.parse(readFileSync(cfgPath, "utf8"));
   expect((cfg3.hooks.Stop as unknown[]).length).toBe(1);
   expect(cfg3.hooks.PermissionRequest).toBeUndefined();
+});
+
+test("title resolution: prompt fallback when ACP has no title", async () => {
+  const calls: Array<{ method: string; url: string; body: unknown }> = [];
+  const fakeFetch: Fetcher = async (url, init) => {
+    calls.push({ method: init.method ?? "GET", url, body: init.body ? JSON.parse(String(init.body)) : null });
+    if (url.endsWith("/sessions") && init.method === "POST") {
+      return new Response(JSON.stringify({ session_id: "devin-t2", url: "https://app.devin.ai/y" }));
+    }
+    return new Response("{}");
+  };
+  const { DevinApi } = await import("../src/twin/api.ts");
+  const ev = new EventStore(join(dir, "ev-title"));
+  ev.append("sid-t", "session_start", { cwd: "/tmp" });
+  ev.append("sid-t", "user_prompt", { prompt: "create `A.txt`\nwith stuff   please" });
+  const tm = new TwinManager(join(dir, "twins-title.json"), new DevinApi("k", "o", fakeFetch),
+    { provider: "none", server: "", topic: "" },
+    { maxAcuLimit: 2, archiveOnEnd: true, isRemoteOn: () => true, events: ev, lookupTitle: async () => null });
+  await tm.trigger("sid-t", "h", "user_prompt", { title: null, cwd: "/tmp/x", handle: "s_t" });
+  const create = calls.find((c) => c.method === "POST" && c.url.endsWith("/sessions"))!;
+  expect((create.body as { title: string }).title).toBe("[MacBook-Pro-3] create A.txt with stuff please");
+});
+
+test("title resolution: ACP lookup caches + refresh on stop", async () => {
+  const ev = new EventStore(join(dir, "ev-title2"));
+  ev.append("sid-r", "user_prompt", { prompt: "fallback title" });
+  let callsToLookup = 0;
+  const tm = new TwinManager(join(dir, "twins-t2.json"), null,
+    { provider: "none", server: "", topic: "" },
+    { maxAcuLimit: 2, archiveOnEnd: true, isRemoteOn: () => false, events: ev,
+      lookupTitle: async () => { callsToLookup++; return callsToLookup === 1 ? "" : "Real Title"; } });
+  expect(await tm.resolveTitle("sid-r")).toBe("fallback title");
+  // ACP title arrives later: re-lookup (unset cache) and refresh both pick it up
+  expect(await tm.resolveTitle("sid-r", true)).toBe("Real Title");
+  expect(await tm.resolveTitle("sid-r")).toBe("Real Title"); // now cached
+  expect(ev.live("sid-r").title).toBe("Real Title");
+});
+
+test("Stop with queued instruction does not post 'turno concluído' trigger", async () => {
+  const posts: string[] = [];
+  const fakeFetch: Fetcher = async (url, init) => {
+    if (init.method === "POST" && String(url).includes("/messages"))
+      posts.push(String(JSON.parse(String(init.body)).message));
+    if (String(url).endsWith("/sessions") && init.method === "POST")
+      return new Response(JSON.stringify({ session_id: "devin-t3", url: "u" }));
+    return new Response("{}");
+  };
+  const { DevinApi } = await import("../src/twin/api.ts");
+  const ev = new EventStore(join(dir, "ev-stop"));
+  const q = new InstructionQueue(join(dir, "q-stop.json"));
+  const rstate = { on: true, holdMinutes: 0.01 };
+  const tm = new TwinManager(join(dir, "twins-stop.json"), new DevinApi("k", "o", fakeFetch),
+    { provider: "none", server: "", topic: "" },
+    { maxAcuLimit: 2, archiveOnEnd: true, isRemoteOn: () => rstate.on, events: ev, lookupTitle: async () => null });
+  const hm = new HandleMap();
+  const hooks = new HookRuntime(ev, q, tm, hm, () => rstate, 100);
+  q.enqueue("sid-s", "do more");
+  const out = await hooks.handle("Stop", { session_id: "sid-s", stop_hook_active: false }, wsDir);
+  expect((out as { decision: string }).decision).toBe("block");
+  await Bun.sleep(50);
+  expect(posts.filter((m) => m.includes("turno concluído"))).toHaveLength(0);
+  // next real Stop (empty queue) does trigger
+  const out2 = await hooks.handle("Stop", { session_id: "sid-s", stop_hook_active: false }, wsDir);
+  expect(out2).toEqual({});
+  await Bun.sleep(50);
+  expect(posts.some((m) => m.includes("turno concluído"))).toBe(true);
 });

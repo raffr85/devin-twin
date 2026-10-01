@@ -6,9 +6,11 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import type { Config } from "./config.ts";
 import { createMcpServer, type Ctx } from "./mcp/server.ts";
 
-const STATE_DIR =
-  process.env.DLB_STATE_DIR ?? join(homedir(), ".local/share/devin-local-bridge");
-const STATE_FILE = join(STATE_DIR, "state.json");
+function statePaths(): { dir: string; file: string } {
+  const dir =
+    process.env.DLB_STATE_DIR ?? join(homedir(), ".local/share/devin-local-bridge");
+  return { dir, file: join(dir, "state.json") };
+}
 
 let lastRequestAt: string | null = null;
 let lastStateWrite = 0;
@@ -19,10 +21,11 @@ function recordRequest(): void {
   if (now - lastStateWrite < 10_000) return;
   lastStateWrite = now;
   try {
-    mkdirSync(STATE_DIR, { recursive: true });
+    const { dir, file } = statePaths();
+    mkdirSync(dir, { recursive: true });
     let prev: Record<string, unknown> = {};
-    if (existsSync(STATE_FILE)) prev = JSON.parse(readFileSync(STATE_FILE, "utf8"));
-    writeFileSync(STATE_FILE, JSON.stringify({ ...prev, lastRequestAt }));
+    if (existsSync(file)) prev = JSON.parse(readFileSync(file, "utf8"));
+    writeFileSync(file, JSON.stringify({ ...prev, lastRequestAt }));
   } catch {}
 }
 

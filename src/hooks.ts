@@ -40,7 +40,11 @@ export class HookRuntime {
   ): Promise<Record<string, unknown>> {
     const sid = String(body.session_id ?? "");
     if (!sid) return {};
-    const meta = { title: null as string | null, cwd, handle: this.handles.sessionHandle(sid) };
+    const meta = {
+      title: await this.twin.resolveTitle(sid),
+      cwd,
+      handle: this.handles.sessionHandle(sid),
+    };
 
     switch (event) {
       case "SessionStart": {
@@ -113,9 +117,6 @@ export class HookRuntime {
           last_assistant_message: body.last_assistant_message,
           stop_hook_active: stopActive,
         });
-        if (!stopActive) {
-          void this.twin.trigger(sid, "turno concluído", "stop", meta);
-        }
         const queued = this.queue.popAll(sid);
         if (queued.length) {
           for (const text of queued)
@@ -141,6 +142,10 @@ export class HookRuntime {
             }
             await Bun.sleep(500);
           }
+        }
+        // only now is the turn actually ending
+        if (!stopActive) {
+          void this.twin.trigger(sid, "turno concluído", "stop", meta);
         }
         return {};
       }

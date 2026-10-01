@@ -30,7 +30,7 @@ export function makeCtx(
     provider: "none",
     server: "",
     topic: "",
-  }, { maxAcuLimit: 2, archiveOnEnd: true, isRemoteOn: () => remote.on });
+  }, { maxAcuLimit: 2, archiveOnEnd: true, isRemoteOn: () => remote.on, events, lookupTitle: async () => null });
   const hooks = new HookRuntime(events, queue, twin, handles, () => remote, permHoldMs);
   return {
     ctx: {
@@ -57,6 +57,7 @@ let base: string;
 
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "dlb-"));
+  process.env.DLB_STATE_DIR = dir;
   answerFile = join(dir, "answers.txt");
   process.env.FAKE_ANSWER_FILE = answerFile;
   process.env.FAKE_CWD = dir;
