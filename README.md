@@ -92,8 +92,8 @@ Twins run `devin_mode:"lite"` with `max_acu_limit` (default 2) and only receive 
 
 | Provider | TLS termination | Notes |
 |---|---|---|
-| `tailscale` (default, recommended) | **Your Mac** | `tailscale funnel --bg --https=443 http://127.0.0.1:<port>` — TLS ends on your machine, stable `*.ts.net` URL. Requires Tailscale running and Funnel enabled in the tailnet ACL (one click in the admin console); only serves ports 443/8443/10000. |
-| `quick` | Cloudflare edge | Zero setup (`cloudflared` only). **Cloudflare can read traffic.** Random URL changes on restart. |
+| `quick` (default) | Cloudflare edge | Zero setup (`cloudflared` only). **Cloudflare can read traffic.** Random URL changes on restart. |
+| `tailscale` | **Your Mac** | `tailscale funnel --bg --https=443 http://127.0.0.1:<port>` — TLS ends on your machine, stable `*.ts.net` URL. Requires Tailscale running and Funnel enabled in the tailnet ACL (one click in the admin console); only serves ports 443/8443/10000. |
 | `cloudflare` | Cloudflare edge | Named tunnel, stable hostname. Requires `cloudflared tunnel login`. **Cloudflare can read traffic.** |
 | `none` | — | BYO reverse proxy / local-only. Set `tunnel.public_url` for `dlb url` output. |
 
