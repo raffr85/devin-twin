@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { loadConfig, type Config } from "../src/config.ts";
 import { AcpPool } from "../src/acp/pool.ts";
 import { HandleMap } from "../src/handles.ts";
-import { startHttp } from "../src/http.ts";
+import { startHttp, startHookHttp } from "../src/http.ts";
 import { EventStore } from "../src/events.ts";
 import { InstructionQueue } from "../src/queue.ts";
 import { HookRuntime } from "../src/hooks.ts";
@@ -23,7 +23,9 @@ let pool: AcpPool;
 let ctx: Ctx;
 let remote: { on: boolean; holdMinutes: number };
 let server: ReturnType<typeof startHttp>;
+let hookServer: ReturnType<typeof startHookHttp>;
 let base: string;
+let hookBase: string;
 let wsDir: string;
 
 function hookBody(over: Record<string, unknown>) {
@@ -31,7 +33,7 @@ function hookBody(over: Record<string, unknown>) {
 }
 
 async function hook(event: string, body: unknown, headers: Record<string, string> = {}) {
-  return fetch(`${base}/hook?event=${event}`, {
+  return fetch(`${hookBase}/hook?event=${event}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -54,6 +56,7 @@ beforeAll(() => {
     DEVIN_BIN: `bun ${FAKE}`,
     DEVIN_API_KEY: "fake",
     BRIDGE_PORT: "0",
+    BRIDGE_HOOK_PORT: "0",
     BRIDGE_HOOK_TOKEN: HOOK_TOK,
     DLB_STATE_DIR: dir,
   });
@@ -82,17 +85,20 @@ beforeAll(() => {
     twin,
   };
   server = startHttp(ctx);
+  hookServer = startHookHttp(ctx);
   base = `http://127.0.0.1:${server.port}`;
+  hookBase = `http://127.0.0.1:${hookServer.port}`;
 });
 
 afterAll(() => {
   pool.shutdown();
   server.stop();
+  hookServer.stop();
   rmSync(dir, { recursive: true, force: true });
 });
 
 test("hook endpoint requires token", async () => {
-  const r = await fetch(`${base}/hook?event=SessionStart`, {
+  const r = await fetch(`${hookBase}/hook?event=SessionStart`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-dlb-cwd": wsDir },
     body: "{}",
@@ -106,7 +112,7 @@ test("hook endpoint rejects tunnel-forwarded requests", async () => {
 });
 
 test("hook ignores cwd outside allowlist", async () => {
-  const r = await fetch(`${base}/hook?event=SessionStart`, {
+  const r = await fetch(`${hookBase}/hook?event=SessionStart`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -467,4 +473,46 @@ test("playbook updated when stored sha is stale", async () => {
   await tm.trigger("s9", "h", "user_prompt", { title: "T", cwd: "/tmp", handle: "s_9" });
   expect(calls.some((c) => c.method === "PUT" && c.url.endsWith("/playbooks/pb-old"))).toBe(true);
   expect(calls.some((c) => c.method === "POST" && c.url.endsWith("/playbooks"))).toBe(false);
+});
+
+test("/hook is not served on the public MCP port", async () => {
+  const r = await fetch(`${base}/hook?event=Stop`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-dlb-hook-token": HOOK_TOK,
+      "x-dlb-cwd": wsDir,
+    },
+    body: "{}",
+  });
+  expect(r.status).toBe(404);
+});
+
+test("expired queued instructions are dropped with instruction_expired", async () => {
+  const ev = new EventStore(join(dir, "ev-exp"));
+  const q = new InstructionQueue(join(dir, "q-exp.json"));
+  const rstate = { on: false, holdMinutes: 0 };
+  const tm = new TwinManager(join(dir, "tw-exp.json"), null,
+    { provider: "none", server: "", topic: "" },
+    { maxAcuLimit: 2, archiveOnEnd: true, isRemoteOn: () => rstate.on, events: ev, lookupTitle: async () => null });
+  const hooks = new HookRuntime(ev, q, tm, new HandleMap(), () => rstate, 100, 50); // 50ms ttl
+  q.enqueue("sid-e", "stale instruction");
+  await Bun.sleep(80);
+  const out = await hooks.handle("Stop", { session_id: "sid-e", stop_hook_active: false }, wsDir);
+  expect(out).toEqual({});
+  const kinds = ev.list("sid-e").events.map((e) => e.kind);
+  expect(kinds).toContain("instruction_expired");
+  expect(kinds).not.toContain("instruction_delivered");
+});
+
+test("redactSecrets masks common secret shapes", async () => {
+  const { redactSecrets } = await import("../src/redact.ts");
+  expect(redactSecrets("api_key=abc123xyz rest")).toBe("api_key=«redacted» rest");
+  expect(redactSecrets("Authorization: Bearer tok123")).toBe("Authorization: «redacted»");
+  expect(redactSecrets("sk-AbCdEfGh1234567890")).toBe("«redacted»");
+  expect(redactSecrets("ghp_abcdefghijklmnop")).toBe("«redacted»");
+  expect(redactSecrets("cog_abcdef1234567890")).toBe("«redacted»");
+  expect(redactSecrets("AKIAIOSFODNN7EXAMPLE")).toBe("«redacted»");
+  expect(redactSecrets("deadbeef".repeat(5))).toBe("«redacted»");
+  expect(redactSecrets("plain text, no secrets")).toBe("plain text, no secrets");
 });

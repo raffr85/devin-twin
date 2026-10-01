@@ -11,6 +11,8 @@ export type Config = {
   apiKey: string | null;
   turnTtlMs: number;
   hookToken: string | null;
+  hookPort: number;
+  queueTtlMs: number;
 };
 
 function readApiKeyFromCredentials(): string | null {
@@ -49,6 +51,16 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     console.error("BRIDGE_PORT must be a valid port");
     process.exit(1);
   }
+  const hookPort = Number(env.BRIDGE_HOOK_PORT ?? "8788");
+  if (!Number.isInteger(hookPort) || hookPort < 0 || hookPort > 65535) {
+    console.error("BRIDGE_HOOK_PORT must be a valid port");
+    process.exit(1);
+  }
+  const queueTtlMin = Number(env.BRIDGE_QUEUE_TTL_MIN ?? "60");
+  if (!Number.isFinite(queueTtlMin) || queueTtlMin <= 0) {
+    console.error("BRIDGE_QUEUE_TTL_MIN must be a positive number of minutes");
+    process.exit(1);
+  }
   const parts = (env.DEVIN_BIN ?? "devin").split(/\s+/).filter(Boolean);
   const devinBin = parts[0] ?? "devin";
   const devinArgs = parts.slice(1);
@@ -75,5 +87,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     apiKey,
     turnTtlMs: ttlMin * 60_000,
     hookToken,
+    hookPort,
+    queueTtlMs: queueTtlMin * 60_000,
   };
 }

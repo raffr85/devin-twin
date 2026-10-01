@@ -1,7 +1,8 @@
 import { loadConfig } from "./config.ts";
 import { AcpPool } from "./acp/pool.ts";
 import { HandleMap } from "./handles.ts";
-import { startHttp } from "./http.ts";
+import { startHttp, startHookHttp } from "./http.ts";
+import { expireStale } from "./pending.ts";
 import { EventStore } from "./events.ts";
 import { InstructionQueue } from "./queue.ts";
 import { HookRuntime } from "./hooks.ts";
@@ -41,7 +42,19 @@ const twin = new TwinManager(
   },
 );
 
-const hooks = new HookRuntime(events, queue, twin, handles, () => readRemote());
+const hooks = new HookRuntime(events, queue, twin, handles, () => readRemote(), 540_000, cfg.queueTtlMs);
+
+const hookServer = startHookHttp({
+  cfg,
+  pool,
+  handles,
+  events,
+  queue,
+  hooks,
+  remote: () => readRemote(),
+  setRemote: (r: RemoteState) => writeRemote(r),
+  twin,
+});
 
 const server = startHttp({
   cfg,
@@ -55,15 +68,17 @@ const server = startHttp({
   twin,
 });
 
-console.log(`devin-local-bridge listening on http://127.0.0.1:${cfg.port}/mcp`);
+setInterval(() => expireStale(cfg.turnTtlMs), 60_000).unref();
 
-process.on("SIGINT", () => {
-  pool.shutdown();
-  server.stop();
-  process.exit(0);
-});
-process.on("SIGTERM", () => {
-  pool.shutdown();
-  server.stop();
-  process.exit(0);
-});
+console.log(
+  `devin-local-bridge listening on http://127.0.0.1:${cfg.port}/mcp (hooks on :${cfg.hookPort})`,
+);
+
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => {
+    pool.shutdown();
+    server.stop();
+    hookServer.stop();
+    process.exit(0);
+  });
+}

@@ -31,7 +31,19 @@ export class HookRuntime {
     private handles: HandleMap,
     private remote: RemoteReader,
     private permHoldMs = 540_000,
+    private queueTtlMs = 3_600_000,
   ) {}
+
+  private drainQueue(sid: string, via: string, handle: string): string[] {
+    const { items, expired } = this.queue.popAll(sid, this.queueTtlMs);
+    for (const text of expired)
+      this.events.append(sid, "instruction_expired", { text });
+    for (const text of items)
+      this.events.append(sid, "instruction_delivered", { text, via });
+    if (items.length) audit({ event: "instruction_delivered", session: handle, via });
+    if (expired.length) audit({ event: "instruction_expired", session: handle });
+    return items;
+  }
 
   async handle(
     event: string,
@@ -54,11 +66,8 @@ export class HookRuntime {
       case "UserPromptSubmit": {
         const prompt = String(body.prompt ?? "");
         this.events.append(sid, "user_prompt", { prompt });
-        const queued = this.queue.popAll(sid);
+        const queued = this.drainQueue(sid, "prompt", meta.handle);
         if (queued.length) {
-          for (const text of queued)
-            this.events.append(sid, "instruction_delivered", { text, via: "prompt" });
-          audit({ event: "instruction_delivered", session: meta.handle, via: "prompt" });
           return {
             hookSpecificOutput: {
               hookEventName: "UserPromptSubmit",
@@ -117,11 +126,8 @@ export class HookRuntime {
           last_assistant_message: body.last_assistant_message,
           stop_hook_active: stopActive,
         });
-        const queued = this.queue.popAll(sid);
+        const queued = this.drainQueue(sid, "stop", meta.handle);
         if (queued.length) {
-          for (const text of queued)
-            this.events.append(sid, "instruction_delivered", { text, via: "stop" });
-          audit({ event: "instruction_delivered", session: meta.handle, via: "stop" });
           return {
             decision: "block",
             reason: `Instrução do usuário enviada pelo celular:\n${queued.map((t) => `- ${t}`).join("\n")}`,
@@ -132,13 +138,13 @@ export class HookRuntime {
           const end = Date.now() + r.holdMinutes * 60_000;
           while (Date.now() < end) {
             if (this.queue.size(sid) > 0) {
-              const items = this.queue.popAll(sid);
-              for (const text of items)
-                this.events.append(sid, "instruction_delivered", { text, via: "stop" });
-              return {
-                decision: "block",
-                reason: `Instrução do usuário enviada pelo celular:\n${items.map((t) => `- ${t}`).join("\n")}`,
-              };
+              const items = this.drainQueue(sid, "stop", meta.handle);
+              if (items.length) {
+                return {
+                  decision: "block",
+                  reason: `Instrução do usuário enviada pelo celular:\n${items.map((t) => `- ${t}`).join("\n")}`,
+                };
+              }
             }
             await Bun.sleep(500);
           }

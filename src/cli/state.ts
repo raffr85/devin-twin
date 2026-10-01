@@ -23,6 +23,8 @@ export type TunnelProvider = "quick" | "tailscale" | "cloudflare" | "none";
 
 export type CliConfig = {
   port: number;
+  hookPort: number;
+  queueTtlMin: number;
   workspaces: string[];
   turnTtlMin: number;
   tunnel: {
@@ -55,6 +57,8 @@ export function readConfig(): CliConfig | null {
   const twin = (raw.twin ?? {}) as Record<string, unknown>;
   return {
     port: Number(raw.port ?? 8787),
+    hookPort: Number(raw.hook_port ?? 8788),
+    queueTtlMin: Number(raw.queue_ttl_min ?? 60),
     workspaces: (raw.workspaces as string[]) ?? [],
     turnTtlMin: Number(raw.turn_ttl_min ?? 30),
     tunnel: {
@@ -78,7 +82,7 @@ export function readConfig(): CliConfig | null {
 export function writeConfig(cfg: CliConfig): void {
   ensureDirs();
   const ws = cfg.workspaces.map((w) => JSON.stringify(w)).join(", ");
-  let out = `port = ${cfg.port}\nworkspaces = [${ws}]\nturn_ttl_min = ${cfg.turnTtlMin}\n\n[tunnel]\nprovider = "${cfg.tunnel.provider}"\n`;
+  let out = `port = ${cfg.port}\nhook_port = ${cfg.hookPort}\nqueue_ttl_min = ${cfg.queueTtlMin}\nworkspaces = [${ws}]\nturn_ttl_min = ${cfg.turnTtlMin}\n\n[tunnel]\nprovider = "${cfg.tunnel.provider}"\n`;
   if (cfg.tunnel.name) out += `name = ${JSON.stringify(cfg.tunnel.name)}\n`;
   if (cfg.tunnel.hostname) out += `hostname = ${JSON.stringify(cfg.tunnel.hostname)}\n`;
   if (cfg.tunnel.publicUrl) out += `public_url = ${JSON.stringify(cfg.tunnel.publicUrl)}\n`;

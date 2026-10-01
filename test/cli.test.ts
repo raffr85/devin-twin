@@ -19,6 +19,8 @@ afterAll(() => {
 function mkCfg(over: Record<string, unknown> = {}) {
   return {
     port: 8787,
+    hookPort: 8788,
+    queueTtlMin: 60,
     workspaces: ["/tmp"],
     turnTtlMin: 30,
     tunnel: { provider: "quick" as const },

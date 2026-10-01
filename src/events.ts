@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { redactData } from "./redact.ts";
 
 export type EvKind =
   | "session_start"
@@ -10,6 +11,7 @@ export type EvKind =
   | "stop"
   | "instruction_queued"
   | "instruction_delivered"
+  | "instruction_expired"
   | "session_end";
 
 export type Ev = { seq: number; ts: string; kind: EvKind; data: Record<string, unknown> };
@@ -119,7 +121,7 @@ export class EventStore {
   }
 
   append(sid: string, kind: EvKind, data: Record<string, unknown>): Ev {
-    const ev: Ev = { seq: (this.seqs.get(sid) ?? 0) + 1, ts: localIso(), kind, data };
+    const ev: Ev = { seq: (this.seqs.get(sid) ?? 0) + 1, ts: localIso(), kind, data: redactData(data) };
     appendFileSync(join(this.dir, `${sid}.jsonl`), JSON.stringify(ev) + "\n");
     this.index(sid, ev);
     return ev;

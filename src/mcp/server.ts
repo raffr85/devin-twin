@@ -190,6 +190,20 @@ export function createMcpServer(ctx: Ctx): McpServer {
     ),
   );
 
+  // max 20 user instructions per hour per session
+  const sendBuckets = new Map<string, number[]>();
+  const sendRateLimited = (sid: string): boolean => {
+    const now = Date.now();
+    const arr = (sendBuckets.get(sid) ?? []).filter((t) => now - t < 3_600_000);
+    if (arr.length >= 20) {
+      sendBuckets.set(sid, arr);
+      return true;
+    }
+    arr.push(now);
+    sendBuckets.set(sid, arr);
+    return false;
+  };
+
   server.registerTool("mac_send_message", {
     description:
       "Send a user message to a local Devin session and let it run on the Mac. Returns immediately; poll mac_get_session / mac_get_pending_actions for progress and permission requests. Fails with locked_by_other_client if the session is open in another client.",
@@ -200,6 +214,10 @@ export function createMcpServer(ctx: Ctx): McpServer {
   }, async ({ session, text }) => {
     const sessionId = ctx.handles.sessionIdFor(session);
     if (!sessionId) return errorResult(`unknown session handle: ${session}`);
+    if (sendRateLimited(sessionId)) {
+      audit({ tool: "mac_send_message", session, outcome: "rate_limited" });
+      return errorResult("rate_limited");
+    }
     try {
       const listed = (await listVisibleSessions(ctx)).find((s) => s.sessionId === sessionId);
       if (!listed) return errorResult("session not found or outside allowed workspaces");

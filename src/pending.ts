@@ -140,3 +140,17 @@ export function dropForSession(sessionId: string): void {
 export function pendingCount(): number {
   return entries.size;
 }
+
+/** Resolve+drop pending actions older than maxAgeMs (ACP/elicitation expiry). */
+export function expireStale(maxAgeMs: number): number {
+  const cutoff = Date.now() - maxAgeMs;
+  let n = 0;
+  for (const [h, e] of entries) {
+    if (Date.parse(e.createdAt) < cutoff) {
+      entries.delete(h);
+      e.resolve({ outcome: { outcome: "cancelled" } });
+      n++;
+    }
+  }
+  return n;
+}

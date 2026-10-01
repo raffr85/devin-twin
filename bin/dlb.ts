@@ -11,6 +11,7 @@ import {
   BRIDGE_LOG,
   BRIDGE_PID_FILE,
   HOOK_TOKEN_FILE,
+  QUEUE_FILE,
   REMOTE_FILE,
   TWINS_FILE,
   TUNNEL_LOG,
@@ -77,6 +78,7 @@ async function cmdSetup(args: string[]): Promise<void> {
     options: {
       workspaces: { type: "string" },
       port: { type: "string" },
+      "hook-port": { type: "string" },
       tunnel: { type: "string" },
       hostname: { type: "string" },
       name: { type: "string" },
@@ -102,6 +104,8 @@ async function cmdSetup(args: string[]): Promise<void> {
 
   const cfg: CliConfig = {
     port,
+    hookPort: values["hook-port"] ? Number(values["hook-port"]) : (prev?.hookPort ?? 8788),
+    queueTtlMin: prev?.queueTtlMin ?? 60,
     workspaces,
     turnTtlMin: prev?.turnTtlMin ?? 30,
     tunnel: {
@@ -243,9 +247,12 @@ async function cmdRemote(sub: string | undefined, rest: string[]): Promise<void>
 // ---- twins ----
 
 async function cmdTwin(sub: string | undefined, arg: string | undefined): Promise<void> {
-  const list = existsSync(TWINS_FILE)
-    ? (JSON.parse(readFileSync(TWINS_FILE, "utf8")) as Record<string, { devinId: string; url: string; archived: boolean; createdAt: string }>)
+  const rawTwins = existsSync(TWINS_FILE)
+    ? (JSON.parse(readFileSync(TWINS_FILE, "utf8")) as Record<string, unknown>)
     : {};
+  const list = Object.fromEntries(
+    Object.entries(rawTwins).filter(([k]) => k !== "_playbook"),
+  ) as Record<string, { devinId: string; url: string; archived: boolean; createdAt: string }>;
   if (sub === "list" || !sub) {
     const entries = Object.entries(list);
     if (!entries.length) console.log("no twins");
@@ -278,7 +285,7 @@ async function cmdTwin(sub: string | undefined, arg: string | undefined): Promis
       }
       console.log(`archived ${t.devinId}`);
     }
-    writeFileSync(TWINS_FILE, JSON.stringify(list, null, 2));
+    writeFileSync(TWINS_FILE, JSON.stringify({ ...rawTwins, ...list }, null, 2));
     return;
   }
   die("usage: dlb twin list|archive <localSessionId|all>");
@@ -326,6 +333,8 @@ async function cmdStart(): Promise<void> {
       BRIDGE_TOKEN: token,
       BRIDGE_WORKSPACES: cfg.workspaces.join(","),
       BRIDGE_PORT: String(cfg.port),
+      BRIDGE_HOOK_PORT: String(cfg.hookPort),
+      BRIDGE_QUEUE_TTL_MIN: String(cfg.queueTtlMin),
       BRIDGE_TURN_TTL_MIN: String(cfg.turnTtlMin),
     },
   });
@@ -412,9 +421,15 @@ async function cmdStatus(json: boolean): Promise<void> {
 
   let twins: Record<string, { archived: boolean; url: string }> = {};
   try {
-    twins = JSON.parse(readFileSync(TWINS_FILE, "utf8"));
+    const raw = JSON.parse(readFileSync(TWINS_FILE, "utf8"));
+    twins = Object.fromEntries(Object.entries(raw).filter(([k]) => k !== "_playbook")) as typeof twins;
   } catch {}
   const remote = readRemote();
+  let queuedInstructions = 0;
+  try {
+    const q = JSON.parse(readFileSync(QUEUE_FILE, "utf8")) as Record<string, unknown[]>;
+    for (const v of Object.values(q)) if (Array.isArray(v)) queuedInstructions += v.length;
+  } catch {}
   const report = {
     bridge: { pid: bridgePid, alive: bridgeAlive, port: cfg?.port, healthy: Boolean(hz?.ok) },
     tunnel: {
@@ -424,8 +439,11 @@ async function cmdStatus(json: boolean): Promise<void> {
       publicUrl: state.publicUrl ?? null,
     },
     remote,
+    queuedInstructions,
     twins: Object.fromEntries(
-      Object.entries(twins).map(([k, v]) => [k, { archived: v.archived, url: v.url }]),
+      Object.entries(twins)
+        .filter(([k]) => k !== "_playbook")
+        .map(([k, v]) => [k, { archived: v.archived, url: v.url }]),
     ),
     lastRequestAt: hz?.lastRequestAt ?? state.lastRequestAt ?? null,
     lastAudit,
@@ -436,7 +454,7 @@ async function cmdStatus(json: boolean): Promise<void> {
   } else {
     console.log(`bridge:  ${bridgeAlive ? `pid ${bridgePid} :${cfg?.port} ${hz?.ok ? "healthy" : "unhealthy"}` : "not running"}`);
     console.log(`tunnel:  ${cfg?.tunnel.provider ?? "?"}${tunnelPid ? ` pid ${tunnelPid} ${tunnelAlive ? "alive" : "dead"}` : ""} ${state.publicUrl ?? ""}`);
-    console.log(`remote:  ${remote.on ? `on (hold ${remote.holdMinutes}m)` : "off"}`);
+    console.log(`remote:  ${remote.on ? `on (hold ${remote.holdMinutes}m)` : "off"}  queued: ${queuedInstructions}`);
     const activeTwins = Object.values(twins).filter((t) => !t.archived).length;
     console.log(`twins:   ${activeTwins} active / ${Object.keys(twins).length} total`);
     console.log(`last req: ${report.lastRequestAt ?? "-"}`);
