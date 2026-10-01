@@ -1,5 +1,5 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, type Config } from "../src/config.ts";
@@ -13,6 +13,16 @@ import { TwinManager } from "../src/twin/manager.ts";
 import type { Ctx } from "../src/mcp/server.ts";
 import type { Fetcher } from "../src/twin/api.ts";
 
+async function poll<T>(fn: () => Promise<T | null>, ms = 8000): Promise<T> {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const v = await fn();
+    if (v) return v;
+    await Bun.sleep(150);
+  }
+  throw new Error("poll timeout");
+}
+
 const TOKEN = "t".repeat(40);
 const HOOK_TOK = "h".repeat(40);
 const FAKE = join(import.meta.dir, "fake-acp-agent.ts");
@@ -21,7 +31,7 @@ let dir: string;
 let cfg: Config;
 let pool: AcpPool;
 let ctx: Ctx;
-let remote: { on: boolean; holdMinutes: number };
+let remote: { on: boolean; maxHoldMinutes: number };
 let server: ReturnType<typeof startHttp>;
 let hookServer: ReturnType<typeof startHookHttp>;
 let base: string;
@@ -49,6 +59,7 @@ beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "dlb-hooks-"));
   process.env.DLB_STATE_DIR = dir;
   wsDir = join(dir, "ws");
+  mkdirSync(wsDir, { recursive: true });
   process.env.FAKE_CWD = wsDir;
   cfg = loadConfig({
     BRIDGE_TOKEN: TOKEN,
@@ -61,7 +72,7 @@ beforeAll(() => {
     DLB_STATE_DIR: dir,
   });
   pool = new AcpPool(cfg);
-  remote = { on: false, holdMinutes: 10 };
+  remote = { on: false, maxHoldMinutes: 720 };
   const events = new EventStore(join(dir, "events"));
   const queue = new InstructionQueue(join(dir, "queue.json"));
   const twin = new TwinManager(join(dir, "twins.json"), null, { provider: "none", server: "", topic: "" }, {
@@ -161,7 +172,7 @@ test("Stop with empty queue and remote off returns {}", async () => {
 
 test("Stop hold in remote mode returns when instruction arrives", async () => {
   remote.on = true;
-  remote.holdMinutes = 0.05; // 3s
+  remote.maxHoldMinutes = 0.05; // 3s
   setTimeout(() => ctx.queue.enqueue("sess-1", "late instruction"), 800);
   const start = Date.now();
   const r = await hook("Stop", hookBody({ stop_hook_active: false }));
@@ -435,7 +446,7 @@ test("Stop with queued instruction does not post 'turno concluído' trigger", as
   const { DevinApi } = await import("../src/twin/api.ts");
   const ev = new EventStore(join(dir, "ev-stop"));
   const q = new InstructionQueue(join(dir, "q-stop.json"));
-  const rstate = { on: true, holdMinutes: 0.01 };
+  const rstate = { on: true, maxHoldMinutes: 0.01 };
   const tm = new TwinManager(join(dir, "twins-stop.json"), new DevinApi("k", "o", fakeFetch),
     { provider: "none", server: "", topic: "" },
     { maxAcuLimit: 2, archiveOnEnd: true, isRemoteOn: () => rstate.on, events: ev, lookupTitle: async () => null });
@@ -491,7 +502,7 @@ test("/hook is not served on the public MCP port", async () => {
 test("expired queued instructions are dropped with instruction_expired", async () => {
   const ev = new EventStore(join(dir, "ev-exp"));
   const q = new InstructionQueue(join(dir, "q-exp.json"));
-  const rstate = { on: false, holdMinutes: 0 };
+  const rstate = { on: false, maxHoldMinutes: 0 };
   const tm = new TwinManager(join(dir, "tw-exp.json"), null,
     { provider: "none", server: "", topic: "" },
     { maxAcuLimit: 2, archiveOnEnd: true, isRemoteOn: () => rstate.on, events: ev, lookupTitle: async () => null });
@@ -516,3 +527,102 @@ test("redactSecrets masks common secret shapes", async () => {
   expect(redactSecrets("deadbeef".repeat(5))).toBe("«redacted»");
   expect(redactSecrets("plain text, no secrets")).toBe("plain text, no secrets");
 });
+
+// ---------- absent mode: indefinite hold, re-arm, remote-off release ----------
+
+test("Stop hold releases when remote mode turns off; healthz reports holds", async () => {
+  const { events, queue, twin, handles } = ctx;
+  const local = { on: true, maxHoldMinutes: 720 };
+  const h = new HookRuntime(events, queue, twin, handles, () => local, 400);
+  const p = h.handle("Stop", { session_id: "sess-rel", stop_hook_active: false }, wsDir);
+  await Bun.sleep(50);
+  expect(h.isHolding("sess-rel")).toBe(true);
+  const z = await fetch(`${hookBase}/healthz`);
+  // ctx.hooks is the shared runtime; our local one isn't registered — check via isHolding
+  expect(((await z.json()) as { ok: boolean }).ok).toBe(true);
+  local.on = false;
+  const out = await p;
+  expect(out).toEqual({});
+  expect(h.isHolding("sess-rel")).toBe(false);
+});
+
+test("Stop re-arm: returns noop block then keeps holding with stop_hook_active", async () => {
+  const { events, queue, twin, handles } = ctx;
+  const local = { on: true, maxHoldMinutes: 720 };
+  const h = new HookRuntime(events, queue, twin, handles, () => local, 400);
+  h.rearmMs = 200;
+  const out1 = (await h.handle("Stop", { session_id: "sess-rm", stop_hook_active: false }, wsDir)) as {
+    decision: string; reason: string;
+  };
+  expect(out1.decision).toBe("block");
+  expect(out1.reason).toContain("modo ausente");
+  // re-armed Stop re-enters the hold; an instruction arriving is delivered
+  const p2 = h.handle("Stop", { session_id: "sess-rm", stop_hook_active: true }, wsDir);
+  await Bun.sleep(50);
+  expect(h.isHolding("sess-rm")).toBe(true);
+  queue.enqueue("sess-rm", "oi from phone");
+  const out2 = (await p2) as { decision: string; reason: string };
+  expect(out2.decision).toBe("block");
+  expect(out2.reason).toContain("oi from phone");
+  expect(h.isHolding("sess-rm")).toBe(false);
+});
+
+test("Stop hold hard cap ends turn and triggers completion once", async () => {
+  const posts: string[] = [];
+  const fakeFetch: Fetcher = async (url, init) => {
+    if (init.method === "POST" && String(url).includes("/messages"))
+      posts.push(String(JSON.parse(String(init.body)).message));
+    if (String(url).endsWith("/playbooks") && init.method === "POST")
+      return new Response(JSON.stringify({ playbook_id: "pb-c" }));
+    if (String(url).endsWith("/sessions") && init.method === "POST")
+      return new Response(JSON.stringify({ session_id: "devin-c", url: "u" }));
+    return new Response("{}");
+  };
+  const { DevinApi } = await import("../src/twin/api.ts");
+  const { events, queue, handles } = ctx;
+  const local = { on: true, maxHoldMinutes: 0.005 }; // ~300ms
+  const tm = new TwinManager(join(dir, "twins-cap.json"), new DevinApi("k", "o", fakeFetch),
+    { provider: "none", server: "", topic: "" },
+    { maxAcuLimit: 2, archiveOnEnd: true, isRemoteOn: () => local.on, events, lookupTitle: async () => null });
+  const h = new HookRuntime(events, queue, tm, handles, () => local, 400);
+  const out = await h.handle("Stop", { session_id: "sess-cap", stop_hook_active: false }, wsDir);
+  expect(out).toEqual({});
+  await Bun.sleep(50);
+  expect(posts).toEqual(["⟳"]);
+  // a second stop of the same turn (stop_hook_active) doesn't re-trigger
+  await h.handle("Stop", { session_id: "sess-cap", stop_hook_active: true }, wsDir);
+  await Bun.sleep(50);
+  expect(posts.filter((m) => m === "⟳").length).toBe(1);
+});
+
+test("SessionEnd drains queued instructions through the ACP pool", async () => {
+  const answerFile = join(dir, `answers-${Date.now()}.txt`);
+  process.env.FAKE_ANSWER_FILE = answerFile;
+  try {
+    const { events, queue, twin, handles } = ctx;
+    const local = { on: false, maxHoldMinutes: 720 };
+    const h = new HookRuntime(events, queue, twin, handles, () => local, 400);
+    h.drainOnEnd = async (sid, cwd, text) => {
+      const r = await pool.sendMessage(sid, cwd, text);
+      if (!r.ok) throw new Error(r.reason);
+    };
+    queue.enqueue("fake-session-open", "drained on end");
+    const out = await h.handle("SessionEnd", { session_id: "fake-session-open", reason: "exit" }, wsDir);
+    expect(out).toEqual({});
+    const content = await poll(async () => {
+      if (!existsSync(answerFile)) return null;
+      const c = readFileSync(answerFile, "utf8");
+      return c.includes("PROMPT=fake-session-open=drained on end") ? c : null;
+    });
+    expect(content).toContain("PROMPT=fake-session-open=drained on end");
+    // respond to its permission so the pool releases it
+    const { listPending, respond } = await import("../src/pending.ts");
+    const p = await poll(
+      async () => listPending("fake-session-open").find((x) => x.kind === "permission") ?? null,
+    );
+    await respond(p.handle, "opt-allow-session");
+    await poll(async () => (pool.isOwned("fake-session-open") ? null : true));
+  } finally {
+    delete process.env.FAKE_ANSWER_FILE;
+  }
+}, 30000);

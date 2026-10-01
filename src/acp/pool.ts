@@ -177,6 +177,57 @@ export class AcpPool {
     });
   }
 
+  /** Create a NEW session owned by the bridge (continuation of a locked one). */
+  async continueSession(
+    cwd: string,
+    promptText: string,
+  ): Promise<{ ok: true; sessionId: string } | { ok: false; reason: string }> {
+    return this.mutationMutex.run(async () => {
+      const owner: Owner = {
+        proc: null as unknown as AcpProcess,
+        updates: [],
+        startedAt: Date.now(),
+      };
+      let sessionId = "";
+      try {
+        const proc = await AcpProcess.spawn(this.cfg, cwd, {
+          onUpdate: (id, u) => {
+            if (id === sessionId) owner.updates.push(u);
+          },
+          onPermission: (params) => {
+            const { promise } = addPendingPermission(
+              sessionId,
+              params.toolCall?.title ?? "permission",
+              (params.options ?? []).map((o) => ({
+                optionId: o.optionId,
+                name: o.name,
+                kind: o.kind,
+              })),
+            );
+            return promise.then((answer) => answer as never);
+          },
+          onElicitation: (params) => {
+            const { promise } = addPendingElicitation(sessionId, params);
+            return promise.then((a) => a as never);
+          },
+        });
+        sessionId = await proc.newSession(cwd);
+        owner.proc = proc;
+        this.owners.set(sessionId, owner);
+        owner.ttlTimer = setTimeout(() => this.expireOwner(sessionId), this.cfg.turnTtlMs);
+        proc
+          .prompt(sessionId, promptText)
+          .catch(() => {})
+          .finally(() => this.releaseOwner(sessionId));
+        return { ok: true, sessionId };
+      } catch (e) {
+        if (sessionId) this.releaseOwner(sessionId);
+        else owner.proc?.kill();
+        return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+      }
+    });
+  }
+
   private releaseOwner(sessionId: string): void {
     const owner = this.owners.get(sessionId);
     if (!owner) return;

@@ -23,6 +23,8 @@ export type TwinRec = {
   createdAt: string;
   lastTriggerAt: number;
   archived: boolean;
+  /** local session ids (continuations) that also feed this twin */
+  aliases?: string[];
 };
 
 const PLAYBOOK_TITLE = "Devin Twin · narrator";
@@ -47,6 +49,8 @@ Quando você receber uma mensagem "⟳": chame mac_get_events com o handle guard
 **Aguardando você:** <summary> — responda **aprovar** ou **negar**.   ← só se houver pendência
 
 O bloco de citação usa \`>\`. Emojis: ▶ rodando · ⏸ aguardando você · ✓ concluído · ✗ erro · 🔒 aberta no Desktop.
+
+Ao enviar instruções com mac_send_message, relate o campo \`delivery\`: "acp_now" → "Enviado; a sessão está rodando." · "hook_live" → "Enviado; o agente recebe em instantes." · "queued_idle_locked" → "A sessão está parada no Desktop; sua instrução fica na fila. Quer que eu continue numa nova sessão com o contexto dela? Responda **continuar**." — se o usuário responder "continuar", chame mac_continue_session com o handle e a última instrução, e passe a monitorar o novo handle retornado.
 
 Mensagens do usuário que NÃO começam com "⟳" são comandos: "aprovar"/"negar" → chame mac_get_pending_actions e mac_respond_permission com a pendência dessa sessão; qualquer outro texto → mac_send_message com o handle e o texto (relate o campo delivery); perguntas → responda brevemente com base em mac_get_events/mac_get_session. Nunca aprove por conta própria; nunca peça confirmação para ler; nunca saia do formato acima.
 
@@ -174,6 +178,24 @@ export class TwinManager {
     return this.playbookPromise;
   }
 
+  /** Map a session id to the canonical key of an existing twin (via aliases). */
+  private canonical(sessionId: string): string {
+    if (this.twins[sessionId]) return sessionId;
+    for (const [k, rec] of Object.entries(this.twins)) {
+      if (rec.aliases?.includes(sessionId)) return k;
+    }
+    return sessionId;
+  }
+
+  /** Continuation sessions feed the same twin. */
+  addAlias(origSessionId: string, newSessionId: string): void {
+    const rec = this.twins[this.canonical(origSessionId)];
+    if (!rec) return;
+    rec.aliases = [...(rec.aliases ?? []), newSessionId];
+    this.persist();
+    audit({ event: "twin_alias", from: origSessionId, to: newSessionId, devinId: rec.devinId });
+  }
+
   async ensureTwin(
     sessionId: string,
     meta: { title?: string | null; cwd?: string | null; handle: string },
@@ -222,15 +244,17 @@ export class TwinManager {
     meta: { title?: string | null; cwd?: string | null; handle: string },
   ): Promise<void> {
     if (!this.opts.isRemoteOn()) return;
+    const canon = this.canonical(sessionId);
+    const isContinuation = canon !== sessionId;
     const refresh = kind === "stop" || kind === "session_end";
     const title = (await this.resolveTitle(sessionId, refresh)) ?? meta.title;
-    const twin = await this.ensureTwin(sessionId, { ...meta, title });
+    const twin = await this.ensureTwin(canon, { ...meta, title });
     if (!twin) return;
     const host = localHostName();
 
     void push(this.pushCfg, {
       host,
-      title: title ?? sessionId,
+      title: `${title ?? sessionId}${isContinuation ? " (continuação)" : ""}`,
       body: headline,
       click: twin.url,
       kind,
@@ -238,7 +262,7 @@ export class TwinManager {
 
     const now = Date.now();
     const send = async () => {
-      this.pendingHeadline.delete(sessionId);
+      this.pendingHeadline.delete(canon);
       try {
         await this.api!.postMessage(twin.devinId, "⟳");
         twin.lastTriggerAt = Date.now();
@@ -248,28 +272,28 @@ export class TwinManager {
       }
     };
     if (kind === "permission_request") {
-      const t = this.timers.get(sessionId);
+      const t = this.timers.get(canon);
       if (t) clearTimeout(t);
       await send();
       return;
     }
     if (kind === "session_end") {
-      const t = this.timers.get(sessionId);
+      const t = this.timers.get(canon);
       if (t) clearTimeout(t);
       await send();
-      if (this.opts.archiveOnEnd) await this.archive(sessionId);
+      if (this.opts.archiveOnEnd) await this.archive(canon);
       return;
     }
     const elapsed = now - twin.lastTriggerAt;
     if (elapsed >= COALESCE_MS) {
       await send();
     } else {
-      this.pendingHeadline.set(sessionId, headline);
-      if (!this.timers.has(sessionId)) {
+      this.pendingHeadline.set(canon, headline);
+      if (!this.timers.has(canon)) {
         this.timers.set(
-          sessionId,
+          canon,
           setTimeout(() => {
-            this.timers.delete(sessionId);
+            this.timers.delete(canon);
             void send();
           }, COALESCE_MS - elapsed),
         );

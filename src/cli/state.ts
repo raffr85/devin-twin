@@ -103,14 +103,14 @@ export function writeHookToken(token: string): void {
   chmodSync(HOOK_TOKEN_FILE, 0o600);
 }
 
-export type RemoteState = { on: boolean; holdMinutes: number };
+export type RemoteState = { on: boolean; maxHoldMinutes: number };
 
 export function readRemote(): RemoteState {
   try {
     const r = JSON.parse(readFileSync(REMOTE_FILE, "utf8"));
-    return { on: Boolean(r.on), holdMinutes: Number(r.holdMinutes ?? 10) };
+    return { on: Boolean(r.on), maxHoldMinutes: Number(r.maxHoldMinutes ?? 720) };
   } catch {
-    return { on: false, holdMinutes: 10 };
+    return { on: false, maxHoldMinutes: 720 };
   }
 }
 

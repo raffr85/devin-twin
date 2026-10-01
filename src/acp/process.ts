@@ -117,6 +117,11 @@ export class AcpProcess {
     });
   }
 
+  async newSession(cwd: string): Promise<string> {
+    const res = await this.conn.newSession({ cwd, mcpServers: [] });
+    return (res as { sessionId: string }).sessionId;
+  }
+
   async loadSession(sessionId: string, cwd: string): Promise<void> {
     await this.conn.loadSession({ sessionId, cwd, mcpServers: [] });
   }

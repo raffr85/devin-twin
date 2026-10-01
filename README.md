@@ -71,8 +71,12 @@ devin hooks (PermissionRequest/Stop/…)      your phone
    mac_respond_permission resolves the held hook → approve/deny
 ```
 
-- **Permission relay**: while the PermissionRequest hook holds (up to `remote.hold_minutes`, default 10; hook timeout 610s), answering via `mac_respond_permission` returns `{"decision":"approve"|"block"}` to the local CLI. Timeout → falls back to the normal Desktop prompt. The bridge never auto-approves.
-- **Stop-hook delivery**: instructions sent with `mac_send_message` to a locally-driven session are queued and injected on the next `Stop` hook as `{"decision":"block","reason":…}`, which makes the local agent keep working on them. With remote mode on and no instruction queued, `Stop` holds up to `hold_minutes` so Desktop keeps showing "working" while you decide.
+- **Permission relay**: while the PermissionRequest hook holds (up to ~9 min; hook timeout 610s), answering via `mac_respond_permission` returns `{"decision":"approve"|"block"}` to the local CLI. Timeout → falls back to the normal Desktop prompt. The bridge never auto-approves.
+- **Stop-hook delivery**: instructions sent with `mac_send_message` to a locally-driven session are queued and injected on the next `Stop` hook as `{"decision":"block","reason":…}`, which makes the local agent keep working on them.
+- **Absent mode**: with remote mode on and nothing queued, `Stop` holds the turn open indefinitely (installed hook timeout 7200s; the bridge re-arms just before the cap — max 48 re-arms per session — and a hard cap of `--max-hold-min`, default 720min, applies overall). The hold ends the instant an instruction arrives or `dlb remote off` runs (which also reports how many holds it released). While a hold is active the session is classified `hook_live`.
+- **SessionEnd drain**: if the session ends with instructions still queued, the bridge waits ~2s for the Desktop session lock to release, then sends them via ACP (`queue_drained_on_end` in the audit log).
+- **Continuation**: `mac_continue_session({session, instruction})` starts a NEW bridge-owned session in the same cwd, seeded with a compact summary of the original's recent history plus your instruction — for sessions stuck idle under a Desktop lock. It feeds the same Twin and pushes carry "(continuação)". Only valid for locked/idle sessions.
+- **Delivery honesty**: `mac_send_message` returns `delivery` = `acp_now` (bridge-owned, sent immediately), `hook_live` (active turn or Stop hold — injected within seconds), or `queued_idle_locked` (idle + Desktop-locked; queued and suggesting `mac_continue_session`).
 - **Twin**: one lite Cloud session per local session (`dlb twin list`, `dlb twin archive <handle|all>`); milestones are coalesced (≥20s), permission requests fire immediately, `session_end` archives the twin.
 - **Push**: `dlb push info` prints your ntfy topic; subscribe in the ntfy app. `dlb push test` sends a test. Clicking a notification opens the twin URL.
 

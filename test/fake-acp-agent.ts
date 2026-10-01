@@ -54,6 +54,18 @@ function onRequest(id: number | string, method: string, params: Record<string, u
     case "session/list":
       send({ jsonrpc: "2.0", id, result: { sessions } });
       break;
+    case "session/new": {
+      const sid = `fake-new-${nextId++}`;
+      sessions.push({
+        sessionId: sid,
+        cwd: String(params.cwd ?? process.env.FAKE_CWD ?? process.cwd()),
+        title: "Fake new session",
+        updatedAt: new Date().toISOString(),
+        _meta: { "cognition.ai/isLocked": false },
+      });
+      send({ jsonrpc: "2.0", id, result: { sessionId: sid } });
+      break;
+    }
     case "session/load": {
       const sid = String(params.sessionId);
       if (sid === "fake-session-locked") {
@@ -90,6 +102,10 @@ function onRequest(id: number | string, method: string, params: Record<string, u
       const text = ((params.prompt as Array<{ text?: string }>) ?? [])
         .map((b) => b.text ?? "")
         .join("");
+      const outFile0 = process.env.FAKE_ANSWER_FILE;
+      try {
+        if (outFile0) appendFileSync(outFile0, `PROMPT=${sid}=${text.replace(/\n/g, "\\n")}\n`);
+      } catch {}
       if (text === "HANG") return; // never respond; turn stays open
       notify(sid, textChunk("agent_message_chunk", "Working on it..."));
       const permId = nextId++;
@@ -128,11 +144,10 @@ function onResponse(msg: { id?: number | string; result?: { outcome?: { optionId
   if (pendingPermission && msg.id === pendingPermission.requestId) {
     const chosen = msg.result?.outcome?.optionId ?? "CANCELLED";
     const outFile = process.env.FAKE_ANSWER_FILE;
-    if (outFile) {
-      appendFileSync(outFile, `PERMISSION_ANSWER=${chosen}\n`);
-    } else {
-      process.stderr.write(`PERMISSION_ANSWER=${chosen}\n`);
-    }
+    try {
+      if (outFile) appendFileSync(outFile, `PERMISSION_ANSWER=${chosen}\n`);
+      else process.stderr.write(`PERMISSION_ANSWER=${chosen}\n`);
+    } catch {}
     const { promptId, sessionId } = pendingPermission;
     pendingPermission = null;
     notify(sessionId, textChunk("agent_message_chunk", "Done."));

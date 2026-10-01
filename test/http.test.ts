@@ -20,9 +20,9 @@ export function makeCtx(
   cfg: Config,
   pool: AcpPool,
   handles = new HandleMap(),
-  remote = { on: false, holdMinutes: 10 },
+  remote = { on: false, maxHoldMinutes: 720 },
   permHoldMs = 540_000,
-): { ctx: Ctx; remote: { on: boolean; holdMinutes: number } } {
+): { ctx: Ctx; remote: { on: boolean; maxHoldMinutes: number } } {
   const i = ++ctxCounter;
   const events = new EventStore(join(dir, `ev-${i}`));
   const queue = new InstructionQueue(join(dir, `q-${i}.json`));
@@ -54,6 +54,7 @@ let server: ReturnType<typeof startHttp>;
 let pool: AcpPool;
 let cfg: Config;
 let base: string;
+let ctx: Ctx;
 
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "dlb-"));
@@ -69,7 +70,8 @@ beforeAll(() => {
     BRIDGE_PORT: "0",
   });
   pool = new AcpPool(cfg);
-  server = startHttp(makeCtx(cfg, pool).ctx);
+  ctx = makeCtx(cfg, pool).ctx;
+  server = startHttp(ctx);
   base = `http://127.0.0.1:${server.port}`;
 });
 
@@ -166,6 +168,7 @@ test("integration: tools/list + session flow with fake agent", async () => {
   const names = tools.tools.map((t) => t.name).sort();
   expect(names).toEqual([
     "mac_answer_question",
+    "mac_continue_session",
     "mac_get_events",
     "mac_get_pending_actions",
     "mac_get_session",
@@ -197,11 +200,11 @@ test("integration: tools/list + session flow with fake agent", async () => {
     session: locked.handle,
     text: "hi",
   })).parsed;
-  // locked sessions get queued for hook delivery instead of an ACP send
+  // locked+idle sessions queue honestly and point at the continuation tool
   expect(lockRes).toEqual({
     accepted: true,
-    delivery: "queued_for_hook",
-    note: "session is driven locally; instruction will be delivered on the next Stop/UserPromptSubmit hook",
+    delivery: "queued_idle_locked",
+    note: "session is idle and open in Desktop; instruction queued — it will be delivered when the session next runs, or use mac_continue_session to continue it now in a new session",
   });
 
   // locked session still replays history before erroring -> read-only transcript
@@ -295,8 +298,43 @@ test("turn TTL: hanging turn is cancelled, owner released, audited", async () =>
     await poll(async () => (pool2.isOwned("fake-session-open") ? null : true));
     await client.close();
   } finally {
+    process.env.FAKE_ANSWER_FILE = answerFile; // restore before removing dir2
     pool2.shutdown();
     srv2.stop();
     rmSync(dir2, { recursive: true, force: true });
   }
 }, 30000);
+
+test("mac_continue_session creates a new session for locked/idle only", async () => {
+  const client = await mcpClient();
+  const listed = (await call(client, "mac_list_sessions")).parsed;
+  const locked = listed.find((s: { isLocked: boolean }) => s.isLocked);
+  const open = listed.find((s: { isLocked: boolean }) => !s.isLocked);
+
+  const res = (await call(client, "mac_continue_session", {
+    session: locked.handle,
+    instruction: "keep going",
+  })).parsed;
+  expect(res.newSession).toMatch(/^s_/);
+  expect(res.title).toContain("(continuação)");
+  // the new session was created via session/new and prompted with context+instruction
+  const content = await poll(async () => {
+    const c = readFileSync(answerFile, "utf8");
+    const m = c.match(/PROMPT=(fake-new-\d+)=(.*)/);
+    return m?.[2]?.includes("keep going") ? m : null;
+  });
+  expect(content[2]!).toContain("Continuação da sessão local");
+  expect(content[2]).toContain("Instrução do usuário");
+  // twin alias recorded (no twin exists yet → no-op, but must not throw)
+  const recs = (ctx.twin as unknown as { twins: Record<string, { aliases?: string[] }> }).twins;
+  expect(recs).toBeDefined();
+}, 20000);
+
+test("narrator playbook body explains delivery modes", async () => {
+  const { NARRATOR_BODY } = await import("../src/twin/manager.ts");
+  expect(NARRATOR_BODY).toContain("queued_idle_locked");
+  expect(NARRATOR_BODY).toContain("mac_continue_session");
+  expect(NARRATOR_BODY).toContain("continuar");
+  expect(NARRATOR_BODY).toContain("hook_live");
+  expect(NARRATOR_BODY).toContain("acp_now");
+});

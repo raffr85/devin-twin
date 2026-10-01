@@ -222,25 +222,70 @@ export function createMcpServer(ctx: Ctx): McpServer {
       const listed = (await listVisibleSessions(ctx)).find((s) => s.sessionId === sessionId);
       if (!listed) return errorResult("session not found or outside allowed workspaces");
       if (!ctx.pool.isOwned(sessionId)) {
-        const hasHooks = ctx.events.hasRecentActivity(sessionId, 10 * 60_000);
-        if (listed.isLocked || hasHooks) {
+        const live = ctx.events.live(sessionId);
+        const active =
+          ctx.hooks.isHolding(sessionId) ||
+          live.state === "running" ||
+          live.state === "waiting_permission" ||
+          ctx.events.hasRecentActivity(sessionId, 60_000);
+        if (active || listed.isLocked) {
           ctx.queue.enqueue(sessionId, text);
           ctx.events.append(sessionId, "instruction_queued", { text });
-          audit({ tool: "mac_send_message", session, outcome: "queued_for_hook" });
-          return toJson({
-            accepted: true,
-            delivery: "queued_for_hook",
-            note: "session is driven locally; instruction will be delivered on the next Stop/UserPromptSubmit hook",
-          });
+          const delivery = active ? "hook_live" : "queued_idle_locked";
+          const note = active
+            ? "delivered to the agent within seconds via the lifecycle hook"
+            : "session is idle and open in Desktop; instruction queued — it will be delivered when the session next runs, or use mac_continue_session to continue it now in a new session";
+          audit({ tool: "mac_send_message", session, outcome: delivery });
+          return toJson({ accepted: true, delivery, note });
         }
       }
       const r = await ctx.pool.sendMessage(sessionId, listed.cwd, text);
-      audit({ tool: "mac_send_message", session, text, outcome: r.ok ? "accepted" : r.reason });
+      audit({ tool: "mac_send_message", session, text, outcome: r.ok ? "acp_now" : r.reason });
       if (!r.ok) return toJson({ accepted: false, reason: r.reason });
-      return toJson({ accepted: true, note: "turn running on Mac; call mac_get_session later" });
+      return toJson({ accepted: true, delivery: "acp_now", note: "turn running on Mac; call mac_get_session later" });
     } catch (e) {
       audit({ tool: "mac_send_message", session, outcome: "error" });
       return errorResult(`send failed: ${e instanceof Error ? e.message : e}`);
+    }
+  });
+
+  server.registerTool("mac_continue_session", {
+    description:
+      "Continue a locked/idle local Devin session in a NEW bridge-owned session with a compact summary of the original's recent history plus your instruction. Use when mac_send_message reports queued_idle_locked. Returns the new session's handle — monitor it with mac_get_events.",
+    inputSchema: {
+      session: z.string().describe("session handle of the locked/idle session"),
+      instruction: z.string().describe("the user's instruction to continue with"),
+    },
+  }, async ({ session, instruction }) => {
+    const sessionId = ctx.handles.sessionIdFor(session);
+    if (!sessionId) return errorResult(`unknown session handle: ${session}`);
+    try {
+      const listed = (await listVisibleSessions(ctx)).find((s) => s.sessionId === sessionId);
+      if (!listed) return errorResult("session not found or outside allowed workspaces");
+      const live = ctx.events.live(sessionId);
+      const busy =
+        ctx.pool.isOwned(sessionId) ||
+        live.state === "running" ||
+        live.state === "waiting_permission";
+      if (busy && !listed.isLocked) return errorResult("use mac_send_message");
+      const { updates } = await ctx.pool.loadTranscript(sessionId, listed.cwd);
+      const items = summarize(foldUpdates(updates), { maxItems: 25, maxChars: 6000 });
+      const historyText = items
+        .map((i) => `${i.role}: ${i.text}${i.toolTitle ? ` [${i.toolTitle}]` : ""}`)
+        .join("\n");
+      const prompt =
+        `Continuação da sessão local "${listed.title || sessionId}" (aberta no Desktop, não editável remotamente). ` +
+        `Resumo do histórico recente:\n${historyText}\n\nInstrução do usuário:\n${instruction}`;
+      const r = await ctx.pool.continueSession(listed.cwd, prompt);
+      if (!r.ok) return errorResult(`continuation failed: ${r.reason}`);
+      ctx.twin.addAlias(sessionId, r.sessionId);
+      audit({ tool: "mac_continue_session", session, newSession: ctx.handles.sessionHandle(r.sessionId) });
+      return toJson({
+        newSession: ctx.handles.sessionHandle(r.sessionId),
+        title: `${listed.title} (continuação)`,
+      });
+    } catch (e) {
+      return errorResult(`continue failed: ${e instanceof Error ? e.message : e}`);
     }
   });
 

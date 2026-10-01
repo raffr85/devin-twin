@@ -43,6 +43,10 @@ const twin = new TwinManager(
 );
 
 const hooks = new HookRuntime(events, queue, twin, handles, () => readRemote(), 540_000, cfg.queueTtlMs);
+hooks.drainOnEnd = async (sid, cwd, text) => {
+  const r = await pool.sendMessage(sid, cwd, text);
+  if (!r.ok) throw new Error(r.reason);
+};
 
 const hookServer = startHookHttp({
   cfg,

@@ -173,7 +173,7 @@ function hooksBlock(): Record<string, Array<unknown>> {
     UserPromptSubmit: [cmd("UserPromptSubmit")],
     PostToolUse: [cmd("PostToolUse")],
     PermissionRequest: [cmd("PermissionRequest", 600, 610)],
-    Stop: [cmd("Stop", 900, 910)],
+    Stop: [cmd("Stop", 7200, 7210)],
     SessionEnd: [cmd("SessionEnd")],
   };
 }
@@ -226,7 +226,7 @@ async function cmdHooks(sub: string | undefined): Promise<void> {
 // ---- remote ----
 
 async function cmdRemote(sub: string | undefined, rest: string[]): Promise<void> {
-  const { values } = parseArgs({ args: rest, options: { "hold-min": { type: "string" } } });
+  const { values } = parseArgs({ args: rest, options: { "max-hold-min": { type: "string" } } });
   const cur = readRemote();
   if (sub === "status" || !sub) {
     console.log(JSON.stringify(cur));
@@ -235,13 +235,26 @@ async function cmdRemote(sub: string | undefined, rest: string[]): Promise<void>
   if (sub === "on" || sub === "off") {
     const next = {
       on: sub === "on",
-      holdMinutes: values["hold-min"] ? Number(values["hold-min"]) : cur.holdMinutes,
+      maxHoldMinutes: values["max-hold-min"] ? Number(values["max-hold-min"]) : cur.maxHoldMinutes,
     };
     writeRemote(next);
-    console.log(`remote ${next.on ? "on" : "off"} (hold ${next.holdMinutes} min)`);
+    let released = 0;
+    if (!next.on && cur.on) {
+      const cfg0 = readConfig();
+      try {
+        const r = await fetch(`http://127.0.0.1:${cfg0?.hookPort ?? 8788}/healthz`, {
+          signal: AbortSignal.timeout(2000),
+        });
+        const j = (await r.json()) as { holds?: number };
+        released = j.holds ?? 0;
+      } catch {}
+    }
+    console.log(
+      `remote ${next.on ? "on" : "off"} (absent mode, cap ${next.maxHoldMinutes} min)${released ? ` — released ${released} hold(s)` : ""}`,
+    );
     return;
   }
-  die("usage: dlb remote on|off|status [--hold-min N]");
+  die("usage: dlb remote on|off|status [--max-hold-min N]");
 }
 
 // ---- twins ----
@@ -454,7 +467,7 @@ async function cmdStatus(json: boolean): Promise<void> {
   } else {
     console.log(`bridge:  ${bridgeAlive ? `pid ${bridgePid} :${cfg?.port} ${hz?.ok ? "healthy" : "unhealthy"}` : "not running"}`);
     console.log(`tunnel:  ${cfg?.tunnel.provider ?? "?"}${tunnelPid ? ` pid ${tunnelPid} ${tunnelAlive ? "alive" : "dead"}` : ""} ${state.publicUrl ?? ""}`);
-    console.log(`remote:  ${remote.on ? `on (hold ${remote.holdMinutes}m)` : "off"}  queued: ${queuedInstructions}`);
+    console.log(`remote:  ${remote.on ? `on (cap ${remote.maxHoldMinutes}m)` : "off"}  queued: ${queuedInstructions}`);
     const activeTwins = Object.values(twins).filter((t) => !t.archived).length;
     console.log(`twins:   ${activeTwins} active / ${Object.keys(twins).length} total`);
     console.log(`last req: ${report.lastRequestAt ?? "-"}`);

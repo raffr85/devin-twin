@@ -69,7 +69,7 @@ export function startHookHttp(ctx: Ctx): ReturnType<typeof Bun.serve> {
     async fetch(req) {
       const url = new URL(req.url);
       if (url.pathname === "/healthz" && req.method === "GET") {
-        return json(200, { ok: true });
+        return json(200, { ok: true, holds: ctx.hooks.activeHoldCount() });
       }
       if (url.pathname !== "/hook" || req.method !== "POST") {
         return json(404, { error: "not found" });
