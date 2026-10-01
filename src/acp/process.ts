@@ -90,7 +90,7 @@ export class AcpProcess {
     await conn.initialize({
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
-      clientInfo: { name: "devin-local-bridge", version: "0.1.0" },
+      clientInfo: { name: "devin-twin", version: "0.1.0" },
     });
     await conn.authenticate({
       methodId: "devin-browser",

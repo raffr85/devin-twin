@@ -8,7 +8,7 @@ import { createMcpServer, type Ctx } from "./mcp/server.ts";
 
 function statePaths(): { dir: string; file: string } {
   const dir =
-    process.env.DLB_STATE_DIR ?? join(homedir(), ".local/share/devin-local-bridge");
+    process.env.TWIN_STATE_DIR ?? process.env.DLB_STATE_DIR ?? join(homedir(), ".local/share/devin-twin");
   return { dir, file: join(dir, "state.json") };
 }
 

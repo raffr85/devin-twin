@@ -1,9 +1,25 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, chmodSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+export const LEGACY_STATE_DIR = join(homedir(), ".local/share/devin-local-bridge");
 export const STATE_DIR =
-  process.env.DLB_STATE_DIR ?? join(homedir(), ".local/share/devin-local-bridge");
+  process.env.TWIN_STATE_DIR ??
+  process.env.DLB_STATE_DIR ??
+  join(homedir(), ".local/share/devin-twin");
+
+/** One-time rename ~/.local/share/devin-local-bridge → devin-twin. */
+export function migrateLegacyStateDir(): void {
+  if (process.env.TWIN_STATE_DIR || process.env.DLB_STATE_DIR) return;
+  try {
+    if (existsSync(LEGACY_STATE_DIR) && !existsSync(STATE_DIR)) {
+      renameSync(LEGACY_STATE_DIR, STATE_DIR);
+      console.error(`migrated state dir ${LEGACY_STATE_DIR} -> ${STATE_DIR}`);
+    }
+  } catch (e) {
+    console.error(`state dir migration failed: ${e}`);
+  }
+}
 export const CONFIG_FILE = join(STATE_DIR, "config.toml");
 export const TOKEN_FILE = join(STATE_DIR, "token");
 export const BRIDGE_PID_FILE = join(STATE_DIR, "bridge.pid");

@@ -72,7 +72,7 @@ async function listVisibleSessions(ctx: Ctx): Promise<SessionInfo[]> {
 }
 
 export function createMcpServer(ctx: Ctx): McpServer {
-  const server = new McpServer({ name: "devin-local-bridge", version: "0.1.0" });
+  const server = new McpServer({ name: "devin-twin", version: "0.1.0" });
 
   server.registerTool("mac_status", {
     description:

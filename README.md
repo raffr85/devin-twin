@@ -1,126 +1,220 @@
-# devin-local-bridge
+# devin-twin
 
-An MCP server that exposes your Mac's **local** Devin CLI/Desktop sessions to a Devin Cloud session — the same sessions the official Devin iOS app shows. A Cloud session can read transcripts, send messages, and answer pending permission prompts and questions on your machine.
+Follow, get notified about, steer, and approve your **local** Devin CLI / Devin Desktop sessions from the official Devin iOS app — by giving each local session a lightweight Cloud "twin" that narrates what the local agent is doing and relays your replies back to it.
 
-> Status: **alpha**.
+Repository: https://github.com/raffr85/devin-twin
+
+> Status: **alpha**. Personal project, not affiliated with Cognition.
+
+## Why this exists
+
+The official Devin app only shows Cloud sessions. Sessions running in Devin CLI or Devin Desktop on your Mac are invisible to it — when you step away, you can't see what the agent is doing, and you can't approve a permission request until you're back at the keyboard.
+
+Local sessions are also locked by the client that owns them: a second process can't write into a session the Desktop app is driving. But the agent's lifecycle hooks (UserPromptSubmit, PermissionRequest, Stop, SessionEnd) run *inside* the owning process and can approve requests, inject instructions, and hold a turn open — no matter which client owns the session.
+
+The Devin v3 API can create tiny `lite`-mode Cloud sessions and attach MCP servers to them. Put those together: a local bridge watches your sessions through hooks and ACP, and a Cloud "twin" session — visible in the iOS app — narrates each local session and calls back into the bridge over authenticated MCP.
+
+## What you get
+
+| | |
+|---|---|
+| Twin card per session | A Cloud session titled `[<hostname>] <session title>` (tagged `mac:<host>`) appears in the app for every local session |
+| Live narration | Milestones (turn started, tool calls, turn done, errors) are narrated in Portuguese by a lite-mode narrator with a fixed layout |
+| Push notifications | Optional ntfy pushes for every milestone; high priority on permission requests; tap opens the twin |
+| Approve/deny | Permission requests show up on the twin; your reply is relayed to the local agent through the hook |
+| Send instructions | Type an instruction in the twin chat; it's delivered into the live turn or queued |
+| Absent mode | `twin remote on` holds every Stop hook open so queued instructions land within seconds |
+| Continuation | Idle Desktop-locked sessions can be continued in a new bridge-owned session with their history summarized |
 
 ## Architecture
 
 ```
-Devin Cloud session
-        │  MCP (Streamable HTTP, Bearer auth)
-        ▼
-┌───────────────────────┐     ┌──────────────────────┐
-│   tunnel (your pick)  │────▶│ devin-local-bridge   │
-│  quick / cloudflare / │     │  Bun, 127.0.0.1:8787 │
-│  tailscale / none     │     │  9 mac_* tools       │
-└───────────────────────┘     └─────────┬────────────┘
-                                        │ ACP (JSON-RPC over stdio)
-                                        ▼
-                              ┌──────────────────────┐
-                              │   devin acp          │
-                              │  spawns per read,    │
-                              │  one owner per turn  │
-                              └──────────────────────┘
+                    ┌─────────────────────────────────────────┐
+                    │              Devin Cloud                │
+                    │  twin session (lite, playbook narrator) │
+                    └───────┬─────────────────────▲───────────┘
+                            │ MCP tools (mac_*)   │ v3 API: session create,
+                            │ over HTTPS tunnel   │ messages, playbook
+┌───────────────┐           ▼                     │
+│  iOS app      │   ┌──────────────┐              │
+│ (sees twin,   │   │    tunnel    │              │
+│  talks to it) │   │ quick/cf/ts  │              │
+└───────────────┘   └──────┬───────┘              │
+                          │ HTTPS                │
+                    ┌─────▼──────────────────────┴──────────┐
+                    │           devin-twin bridge           │
+                    │  :8787 /mcp + /healthz (tunneled)     │
+                    │  :8788 /hook (localhost only)         │
+                    └─▲───────────────┬──────────────┬──────┘
+        hook events   │               │ ACP stdio    │ ntfy
+  (SessionStart,      │               ▼              ▼
+   UserPromptSubmit,  │      ┌──────────────┐  ┌──────────┐
+   PermissionRequest, │      │  devin acp   │  │ ntfy.sh  │
+   PostToolUse, Stop, │      │  (per turn,  │  │ (push)   │
+   SessionEnd)        │      │  + reader)   │  └──────────┘
+                      │      └──────────────┘
+        ┌─────────────┴───────┐
+        │  Devin CLI / Desktop │  ← same sessions the app can't see
+        └─────────────────────┘
 ```
 
-Reads spawn a short-lived `devin acp` process that replays history and exits. `mac_send_message` spawns one owner process per session that lives for the duration of the turn and proxies `session/request_permission` / `elicitation/create` back as MCP tools.
+## How a round-trip works
+
+1. You prompt a local session (CLI or Desktop).
+2. The agent finishes its turn → the `Stop` hook fires into the bridge. With absent mode on, the bridge holds the turn open (the session still shows "working").
+3. The bridge fires a `⟳` trigger into the twin and sends you an ntfy push: "turno concluído · aguardando suas instruções".
+4. You open the twin in the app, read the narration, and reply with an instruction.
+5. The twin calls `mac_send_message`; the bridge's held Stop hook returns it as `{"decision":"block","reason":…}`, so the local agent picks it up and keeps working.
+6. The agent needs a permission → `PermissionRequest` hook holds → push + twin render → you answer "aprovar" → `mac_respond_permission` → the hook returns `{"decision":"approve"}` → the command runs.
 
 ## Quick start
 
+Requirements: macOS, Devin CLI installed and logged in (`devin` works), Bun ≥ 1.3, and a Devin Cloud organization where you can add a custom MCP server (admin).
+
 ```sh
-bun install
-bun link          # puts `dlb` on your PATH
-dlb setup         # workspaces, port, tunnel provider
-dlb start         # prints your public MCP URL + Authorization header
-dlb status        # health check
-dlb doctor        # devin binary, credentials, ACP round-trip, tunnel
-dlb stop
+git clone https://github.com/raffr85/devin-twin && cd devin-twin
+bun install && bun link        # exposes `twin` (and `dlb` as an alias)
+twin setup                     # workspaces, port, tunnel provider, tokens
+twin hooks install             # merges lifecycle hooks into ~/.config/devin/config.json
+twin start                     # bridge + tunnel
+twin url                       # prints the MCP URL + Authorization header
 ```
 
-Config lives in `~/.local/share/devin-local-bridge/` (`config.toml`, `token`, pid files, `logs/`, `audit.jsonl`, `state.json`).
+Then in Devin Cloud: **Customize → MCPs → Add custom MCP → HTTP** — paste the URL from `twin url`, and the `Authorization: Bearer …` header it prints. Run "Test tools" — you should see the `mac_*` tools.
 
-## Devin Cloud setup
+Finally: `twin remote on` (absent mode), open a session in Desktop, and watch its twin appear in the app.
 
-1. `dlb start` — copy the printed URL and header.
-2. Devin Cloud → **Customize → MCPs → Add custom MCP → HTTP**.
-3. URL: `https://<your-tunnel>/mcp`; Auth header: `Authorization: Bearer <token>`; **Test tools**.
+## Exposing the bridge (tunnels)
 
-## Suggested Cloud session prompt
+The bridge binds `127.0.0.1`; only `/mcp` and `/healthz` are reachable through the tunnel — hooks live on a separate localhost-only port (8788) that never touches the tunnel. You pick how the outside world reaches `/mcp`:
 
-> You are the control panel for my Mac. Use the mac_* tools. Always call mac_list_sessions before stating any session state; never invent results. Show sessions numbered with title, state and last activity. Ask me for confirmation before approving any permission. If the Mac is offline, say so. Start by telling me what is running on my Mac.
+| Provider | TLS termination | URL stability | Notes |
+|---|---|---|---|
+| `quick` (default) | Cloudflare edge | changes every `twin start` | zero setup; Cloudflare can read traffic; **you must update the MCP URL in Devin Cloud after each start** |
+| `cloudflare` | Cloudflare edge | stable hostname | needs a domain on Cloudflare + `cloudflared tunnel login` |
+| `tailscale` | **your Mac** | stable `*.ts.net` | needs the Tailscale app + Funnel enabled in the tailnet ACL; makes your Mac a tailnet node |
+| `none` | — | — | BYO reverse proxy; set `tunnel.public_url` for `twin url` output |
 
-PT-BR:
+### quick
 
-> Você é o painel de controle do meu Mac. Use as tools mac_*. Sempre chame mac_list_sessions antes de afirmar o estado de qualquer sessão; nunca invente resultados. Mostre as sessões numeradas com título, estado e última atividade. Peça minha confirmação antes de aprovar qualquer permissão. Se o Mac estiver offline, diga isso. Comece me contando o que está rodando no meu Mac.
+`twin setup --tunnel quick` — done. After every `twin start`/`restart`, run `twin url` and update the MCP URL in Devin Cloud. There is no API to update the URL remotely, so for daily use a stable hostname is strongly recommended.
 
-## Devin Twin
+### cloudflare (named tunnel)
 
-Local hooks (`dlb hooks install`) feed every session milestone into the bridge. With **remote mode** on (`dlb remote on`), the bridge spawns a lite Devin Cloud session — a *Devin Twin* — that narrates your local session and relays your replies back:
-
-```
-devin hooks (PermissionRequest/Stop/…)      your phone
-        │  POST /hook (localhost, hook token)    │
-        ▼                                        ▼
-┌──────────────────────────┐   Devin v3 API   ┌──────────────┐
-│ devin-local-bridge       │ ───────────────▶ │  Devin Twin  │
-│ events.jsonl + queue     │                  │  lite, ≤2 ACU│
-└───────────┬──────────────┘                  └──────────────┘
-            │  milestones ──▶ ntfy push (topic dlb-…)
-            ▼
-   mac_respond_permission resolves the held hook → approve/deny
+```sh
+cloudflared tunnel login
+cloudflared tunnel create devin-twin        # note the tunnel name
+# route a hostname: cloudflared tunnel route dns devin-twin twin.example.com
+twin setup --tunnel cloudflare --name devin-twin --hostname twin.example.com
+twin start
 ```
 
-- **Permission relay**: while the PermissionRequest hook holds (up to ~9 min; hook timeout 610s), answering via `mac_respond_permission` returns `{"decision":"approve"|"block"}` to the local CLI. Timeout → falls back to the normal Desktop prompt. The bridge never auto-approves.
-- **Stop-hook delivery**: instructions sent with `mac_send_message` to a locally-driven session are queued and injected on the next `Stop` hook as `{"decision":"block","reason":…}`, which makes the local agent keep working on them.
-- **Absent mode**: with remote mode on and nothing queued, `Stop` holds the turn open indefinitely (installed hook timeout 7200s; the bridge re-arms just before the cap — max 48 re-arms per session — and a hard cap of `--max-hold-min`, default 720min, applies overall). The hold ends the instant an instruction arrives or `dlb remote off` runs (which also reports how many holds it released). While a hold is active the session is classified `hook_live`.
-- **SessionEnd drain**: if the session ends with instructions still queued, the bridge waits ~2s for the Desktop session lock to release, then sends them via ACP (`queue_drained_on_end` in the audit log).
-- **Continuation**: `mac_continue_session({session, instruction})` starts a NEW bridge-owned session in the same cwd, seeded with a compact summary of the original's recent history plus your instruction — for sessions stuck idle under a Desktop lock. It feeds the same Twin and pushes carry "(continuação)". Only valid for locked/idle sessions.
-- **Delivery honesty**: `mac_send_message` returns `delivery` = `acp_now` (bridge-owned, sent immediately), `hook_live` (active turn or Stop hold — injected within seconds), or `queued_idle_locked` (idle + Desktop-locked; queued and suggesting `mac_continue_session`).
-- **Twin**: one lite Cloud session per local session (`dlb twin list`, `dlb twin archive <handle|all>`); milestones are coalesced (≥20s), permission requests fire immediately, `session_end` archives the twin.
-- **Push**: `dlb push info` prints your ntfy topic; subscribe in the ntfy app. `dlb push test` sends a test. Clicking a notification opens the twin URL.
+### tailscale (Funnel)
 
-### Cost notes
+```sh
+# install Tailscale, log in, then:
+tailscale funnel --bg --https=443 http://127.0.0.1:8787
+# if Funnel isn't enabled, the command prints an admin-console link — click it once
+twin setup --tunnel tailscale
+twin start
+```
 
-Twins run `devin_mode:"lite"` with `max_acu_limit` (default 2) and only receive milestone updates — measured 0.0 ACU for 6 narration turns.
+TLS terminates on your Mac and the URL (`https://<machine>.<tailnet>.ts.net`) is stable. Trade-off: your machine becomes a Tailscale node and Funnel exposes it to the internet.
 
-### Security notes (twin mode)
+### none
 
-- `/hook` lives on a **separate localhost-only port** (`hook_port` in config.toml, default 8788) that is never exposed through the tunnel; the public port returns 404 for it. It requires a separate `hook_token` (0600, generated by `dlb setup`) and refuses requests carrying tunnel headers (`cf-ray`, `cf-connecting-ip`, `x-forwarded-for`).
-- Event data (`user_prompt`, tool summaries, `last_assistant_message`) is redacted before storage — `api_key=…`, `Bearer …`, `sk-`/`ghp_`/`cog_`/`AKIA…` tokens and 32+ hex strings become `«redacted»`.
-- Queued instructions expire after `queue_ttl_min` (default 60) and are dropped with an `instruction_expired` event; ACP pending actions expire with the turn TTL. `mac_send_message` is limited to 20/hour per session (`rate_limited`).
-- **Phone-origin authority**: the bridge never treats twin-agent text as a decision. Approvals/denials only arrive via `mac_respond_permission` over authenticated MCP.
-- Remote mode is opt-in (`dlb remote on|off`, `dlb remote status`, or the `mac_remote_mode` tool) and defaults to off.
+`twin setup --tunnel none --public-url https://your-proxy.example.com` — run your own reverse proxy in front of `127.0.0.1:8787`.
 
-## Tunnel providers
+## Notifications (optional)
 
-| Provider | TLS termination | Notes |
-|---|---|---|
-| `quick` (default) | Cloudflare edge | Zero setup (`cloudflared` only). **Cloudflare can read traffic.** Random URL changes on restart. |
-| `tailscale` | **Your Mac** | `tailscale funnel --bg --https=443 http://127.0.0.1:<port>` — TLS ends on your machine, stable `*.ts.net` URL. Requires Tailscale running and Funnel enabled in the tailnet ACL (one click in the admin console); only serves ports 443/8443/10000. |
-| `cloudflare` | Cloudflare edge | Named tunnel, stable hostname. Requires `cloudflared tunnel login`. **Cloudflare can read traffic.** |
-| `none` | — | BYO reverse proxy / local-only. Set `tunnel.public_url` for `dlb url` output. |
+Push uses [ntfy](https://ntfy.sh) — a simple HTTP pub/sub service with a free hosted server and an iOS app. `twin setup` generates a random unguessable topic (`twin-<hex>`); `twin push info` prints it. In the ntfy app: "Subscribe to topic" → paste it. `twin push test` sends a test.
+
+The topic is a secret — anyone who knows it can read your pushes (and they contain session titles and milestone headlines). To use your own server, set `[push] server` in `config.toml`; to disable pushes entirely, set `provider = "none"`. Every push carries a deep link to the twin session.
+
+## Absent mode
+
+`twin remote on` turns on absent mode:
+
+- **Stop hold**: when a turn ends, the Stop hook holds the session open (Desktop shows "working") instead of letting it go idle. Instructions you send are injected within seconds. The hold re-arms under the hook's 2-hour timeout (max 48 re-arms per session) and has a hard cap (`--max-hold-min`, default 720). `twin remote off` releases all active holds immediately and reports how many.
+- **Permission relay**: `PermissionRequest` holds up to ~9 minutes; if you don't answer, it falls through and the normal Desktop prompt appears. The bridge never auto-approves.
+- **Honest delivery**: `mac_send_message` reports `acp_now` (bridge-owned session, sent immediately), `hook_live` (active turn or Stop hold — injected in seconds), or `queued_idle_locked` (idle + Desktop-locked — queued, with a suggestion to use `mac_continue_session`).
+- **SessionEnd drain**: if a session ends with queued instructions, the bridge waits ~2s for the session lock to release, then sends them over ACP (`queue_drained_on_end` in the audit log).
+- **Continuation**: `mac_continue_session` spawns a new bridge-owned session in the same cwd, seeded with a compact summary of the original's history plus your instruction. It narrates into the same twin; pushes get "(continuação)".
+
+Leave absent mode off when you're at the desk — held turns keep Desktop showing "working" and route permission prompts through your phone.
+
+## The twin session
+
+- One twin per local session, created lazily on the first milestone while remote mode is on; auto-archived on `session_end`.
+- Runs `devin_mode: "lite"` with `max_acu_limit` (default 2). Milestones are coalesced (≥20s apart; permission requests go immediately). Measured cost across today's test turns: 0.0 ACU.
+- Narration is driven by an org-level playbook, "Devin Twin · narrator" (created once, updated when the bundled text changes — see `src/twin/manager.ts`). Twin chats show only `⟳ <handle> · <title>` triggers plus the narrator's replies.
+- Twins are tagged `mac:<hostname>` and titled `[<host>] <resolved title>`.
 
 ## Security model
 
-- Bearer token auth (constant-time compare), 60 req/min per token, `127.0.0.1` bind only.
-- Sessions are only visible if their `cwd` is inside `BRIDGE_WORKSPACES`; real session ids and paths are never exposed — tools use opaque `s_…`/`w_…` handles.
-- No shell tool, no arbitrary paths, no session creation.
-- Permission requests never expose `allow_always` — only reject / allow once / allow-session.
-- Unanswered turns are cancelled after `BRIDGE_TURN_TTL_MIN` (default 30) so the Desktop app can reclaim the session lock.
-- Every mutating call is appended to `audit.jsonl` (message bodies truncated to 200 chars).
+- Bearer-token auth on `/mcp` (constant-time compare), 60 requests/minute/token, `127.0.0.1` bind.
+- Only sessions whose `cwd` is inside your configured `workspaces` are visible; tools take opaque `s_…`/`w_…` handles — real session ids and paths never cross the wire. No shell tool, no arbitrary path access, no session creation except `mac_continue_session` inside an existing workspace.
+- `allow_always` permission options are filtered down to session-scoped grants before they reach the twin.
+- The hook endpoint lives on a separate localhost-only port with its own `hook_token` (0600), and rejects any request carrying tunnel headers (`cf-ray`, `cf-connecting-ip`, `x-forwarded-for`) — a tunneled request can't reach it even if DNS tricks send it to the right port.
+- Event text (`user_prompt`, tool summaries, `last_assistant_message`) is redacted before storage: `api_key=…`, `Bearer …`, `sk-`/`ghp_`/`cog_`/`AKIA…`, and 32+-char hex strings become `«redacted»`.
+- Queued instructions expire after `queue_ttl_min` (default 60); pending actions expire with the turn TTL; `mac_send_message` is rate-limited to 20/hour/session.
+- Everything mutating is appended to `audit.jsonl`.
+- **Phone-origin authority**: the twin agent is never treated as authoritative — approvals and instructions only take effect through authenticated `mac_*` tool calls, which are what the Cloud session issues when you type in its chat.
+- **Threat model, plainly**: whoever holds the bearer token can steer your local agent and approve commands while absent mode is on. Rotate with `twin token rotate` (then update the MCP header in Cloud). The twin/Cognition sees session titles, tool summaries, last assistant messages, and pending permission text — keep that in mind for sensitive repos. Keep absent mode off when you don't need it.
 
-## Known limits
+## CLI reference
 
-- `session/list` returns at most the 50 most recent sessions (devin CLI cap).
-- Sessions open in Devin Desktop/CLI are read-only through the bridge — the transcript is served from the replayed history, but `mac_send_message` returns `locked_by_other_client`.
-- The Mac must stay awake for the bridge to answer.
-- Each Cloud query consumes ACUs.
-- Turn timeouts default to 30 minutes (`turn_ttl_min` in config.toml).
+| Command | What it does |
+|---|---|
+| `twin setup` | Write `config.toml`, generate bearer + hook tokens (flags: `--workspaces --port --hook-port --tunnel --name --hostname --public-url`) |
+| `twin start` / `stop` / `restart` | Manage bridge + tunnel processes (pidfiles in the state dir) |
+| `twin status` | Bridge/tunnel health, remote mode, queue size, twin counts, last request/audit |
+| `twin url` | Print the MCP URL + Authorization header for Devin Cloud |
+| `twin token rotate` | Generate a new bearer token (update the Cloud MCP afterwards) |
+| `twin logs [--tunnel] [--audit]` | Tail bridge / tunnel / audit logs |
+| `twin doctor` | Check devin binary, credentials, config, token, ACP round-trip, tunnel provider |
+| `twin hooks install` / `uninstall` / `status` | Merge (idempotent, with backup) or remove the lifecycle hooks in `~/.config/devin/config.json` |
+| `twin remote on` / `off` / `status` | Absent mode; `--max-hold-min N` sets the hard cap (default 720) |
+| `twin twin list` / `archive <id|all>` | List twins, archive them |
+| `twin push info` / `test` | Print the ntfy topic / send a test push |
 
-## Dev
+## Configuration
 
-```sh
-bun test             # unit + integration tests (fake ACP agent)
-bun run typecheck    # tsc --noEmit, strict
+`~/.local/share/devin-twin/config.toml`:
+
+```toml
+port = 8787           # public MCP port (localhost; what the tunnel proxies to)
+hook_port = 8788      # localhost-only hook port
+queue_ttl_min = 60    # queued instructions expire after this
+turn_ttl_min = 30     # owned turns are cancelled after this
+workspaces = ["/abs/path"]  # only sessions with cwd under these are visible
+
+[tunnel]
+provider = "quick"    # quick | cloudflare | tailscale | none
+# name/hostname/public_url depending on provider
+
+[push]
+provider = "ntfy"     # ntfy | none
+server = "https://ntfy.sh"
+topic = "twin-xxxxxx" # secret — generated by setup
+
+[twin]
+max_acu_limit = 2
+archive_on_end = true
 ```
+
+State dir (`~/.local/share/devin-twin`): `token`, `hook_token`, `config.toml`, `remote.json`, `state.json`, `queue.json`, `twins.json`, `events/*.jsonl`, `audit.jsonl`, `logs/`, pidfiles. Env vars: `TWIN_*` preferred, `DLB_*` accepted for compatibility (`TWIN_STATE_DIR`, `TWIN_DEVIN_CONFIG`, `TWIN_HOOK_PORT`, …). On first run, `~/.local/share/devin-local-bridge` is migrated automatically.
+
+## Limits & known issues
+
+- `session/list` is capped at ~50 sessions by the CLI.
+- The quick tunnel URL changes on every start — update the MCP entry in Cloud each time, or use a stable provider.
+- Desktop permission mode must be **Normal** for approvals to route through the bridge (Smart/Bypass auto-approve locally).
+- Idle Desktop-locked sessions can't receive input directly — absent mode holds future turns, and `mac_continue_session` covers already-idle ones.
+- Hook round-trip adds ~6ms per event; ACP reads take ~4s (subprocess spawn + replay).
+- Mobile push goes through ntfy, not the Devin app — install it or accept in-app twin polling only.
+- The narrator is a lite LLM — it can phrase things oddly; the underlying `mac_get_events` feed is always the source of truth.
+
+## Credits
+
+Built on Devin CLI's ACP mode (`devin acp`), the CLI lifecycle hooks, the `@agentclientprotocol/sdk` and `@modelcontextprotocol/sdk` packages, the Devin v3 API, and ntfy. MIT — Rafael Affonso.

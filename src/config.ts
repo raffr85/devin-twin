@@ -73,7 +73,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   let hookToken = env.BRIDGE_HOOK_TOKEN ?? null;
   if (!hookToken) {
     const dir =
-      env.DLB_STATE_DIR ?? join(homedir(), ".local/share/devin-local-bridge");
+      env.TWIN_STATE_DIR ?? env.DLB_STATE_DIR ?? join(homedir(), ".local/share/devin-twin");
     try {
       hookToken = readFileSync(join(dir, "hook_token"), "utf8").trim() || null;
     } catch {}

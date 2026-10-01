@@ -10,6 +10,7 @@ import { TwinManager } from "./twin/manager.ts";
 import { DevinApi, devinApiKey, devinOrgId } from "./twin/api.ts";
 import {
   EVENTS_DIR,
+  migrateLegacyStateDir,
   QUEUE_FILE,
   TWINS_FILE,
   readConfig,
@@ -17,6 +18,8 @@ import {
   writeRemote,
   type RemoteState,
 } from "./cli/state.ts";
+
+migrateLegacyStateDir();
 
 const cfg = loadConfig();
 const pool = new AcpPool(cfg);
@@ -75,7 +78,7 @@ const server = startHttp({
 setInterval(() => expireStale(cfg.turnTtlMs), 60_000).unref();
 
 console.log(
-  `devin-local-bridge listening on http://127.0.0.1:${cfg.port}/mcp (hooks on :${cfg.hookPort})`,
+  `devin-twin listening on http://127.0.0.1:${cfg.port}/mcp (hooks on :${cfg.hookPort})`,
 );
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {

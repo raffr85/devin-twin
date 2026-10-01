@@ -1,5 +1,5 @@
 {
-  "name": "devin-local-bridge",
+  "name": "devin-twin",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
@@ -20,6 +20,7 @@
     "typescript": "5"
   },
   "bin": {
-    "dlb": "bin/dlb.ts"
+    "twin": "bin/twin.ts",
+    "dlb": "bin/twin.ts"
   }
 }

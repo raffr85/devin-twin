@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 function paths(): { dir: string; file: string } {
   const dir =
-    process.env.DLB_STATE_DIR ?? join(homedir(), ".local/share/devin-local-bridge");
+    process.env.TWIN_STATE_DIR ?? process.env.DLB_STATE_DIR ?? join(homedir(), ".local/share/devin-twin");
   return { dir, file: join(dir, "audit.jsonl") };
 }
 

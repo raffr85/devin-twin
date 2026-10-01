@@ -18,6 +18,7 @@ import {
   TUNNEL_PID_FILE,
   CONFIG_FILE,
   ensureDirs,
+  migrateLegacyStateDir,
   pidAlive,
   readConfig,
   readHookToken,
@@ -136,7 +137,7 @@ async function cmdSetup(args: string[]): Promise<void> {
     cfg.push = {
       provider: "ntfy",
       server: cfg.push.server || "https://ntfy.sh",
-      topic: cfg.push.topic || `dlb-${randomBytes(6).toString("hex")}`,
+      topic: cfg.push.topic || `twin-${randomBytes(6).toString("hex")}`,
     };
   }
   writeConfig(cfg);
@@ -153,9 +154,9 @@ async function cmdSetup(args: string[]): Promise<void> {
 
 // ---- hooks ----
 
-const HOOK_SCRIPT = join(REPO, "hooks", "dlb-hook.sh");
+const HOOK_SCRIPT = join(REPO, "hooks", "twin-hook.sh");
 const DEVIN_CONFIG =
-  process.env.DLB_DEVIN_CONFIG ?? join(homedir(), ".config/devin/config.json");
+  process.env.TWIN_DEVIN_CONFIG ?? process.env.DLB_DEVIN_CONFIG ?? join(homedir(), ".config/devin/config.json");
 
 function hooksBlock(): Record<string, Array<unknown>> {
   const cmd = (ev: string, maxTime = 3, timeout?: number) => ({
@@ -180,7 +181,7 @@ function hooksBlock(): Record<string, Array<unknown>> {
 
 function isDlbHookEntry(e: unknown): boolean {
   const hooks = (e as { hooks?: Array<{ command?: string }> }).hooks ?? [];
-  return hooks.some((h) => typeof h.command === "string" && h.command.includes("dlb-hook.sh"));
+  return hooks.some((h) => typeof h.command === "string" && (h.command.includes("twin-hook.sh") || h.command.includes("dlb-hook.sh")));
 }
 
 async function cmdHooks(sub: string | undefined): Promise<void> {
@@ -199,7 +200,7 @@ async function cmdHooks(sub: string | undefined): Promise<void> {
     if (!readHookToken()) writeHookToken(randomBytes(32).toString("hex"));
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     if (existsSync(DEVIN_CONFIG))
-      writeFileSync(`${DEVIN_CONFIG}.bak-dlb-${stamp}`, readFileSync(DEVIN_CONFIG));
+      writeFileSync(`${DEVIN_CONFIG}.bak-twin-${stamp}`, readFileSync(DEVIN_CONFIG));
     const ours = hooksBlock();
     for (const [ev, entries] of Object.entries(ours)) {
       const existing = (hooks[ev] ?? []).filter((e) => !isDlbHookEntry(e));
@@ -207,7 +208,7 @@ async function cmdHooks(sub: string | undefined): Promise<void> {
     }
     cfg.hooks = hooks;
     writeFileSync(DEVIN_CONFIG, JSON.stringify(cfg, null, 2));
-    console.log(`installed hooks into ${DEVIN_CONFIG} (backup: config.json.bak-dlb-${stamp})`);
+    console.log(`installed hooks into ${DEVIN_CONFIG} (backup: config.json.bak-twin-${stamp})`);
     return;
   }
   if (sub === "uninstall") {
@@ -217,10 +218,10 @@ async function cmdHooks(sub: string | undefined): Promise<void> {
     }
     cfg.hooks = hooks;
     writeFileSync(DEVIN_CONFIG, JSON.stringify(cfg, null, 2));
-    console.log("dlb hooks removed");
+    console.log("twin hooks removed");
     return;
   }
-  die("usage: dlb hooks install|uninstall|status");
+  die("usage: twin hooks install|uninstall|status");
 }
 
 // ---- remote ----
@@ -254,7 +255,7 @@ async function cmdRemote(sub: string | undefined, rest: string[]): Promise<void>
     );
     return;
   }
-  die("usage: dlb remote on|off|status [--max-hold-min N]");
+  die("usage: twin remote on|off|status [--max-hold-min N]");
 }
 
 // ---- twins ----
@@ -285,7 +286,7 @@ async function cmdTwin(sub: string | undefined, arg: string | undefined): Promis
         ? Object.keys(list).filter((k) => !list[k]!.archived)
         : arg
           ? [arg]
-          : die("usage: dlb twin archive <localSessionId|all>");
+          : die("usage: twin twin archive <localSessionId|all>");
     for (const sid of targets) {
       const t = list[sid];
       if (!t) {
@@ -301,15 +302,15 @@ async function cmdTwin(sub: string | undefined, arg: string | undefined): Promis
     writeFileSync(TWINS_FILE, JSON.stringify({ ...rawTwins, ...list }, null, 2));
     return;
   }
-  die("usage: dlb twin list|archive <localSessionId|all>");
+  die("usage: twin twin list|archive <localSessionId|all>");
 }
 
 // ---- push ----
 
 async function cmdPush(sub: string | undefined): Promise<void> {
-  const cfg = readConfig() ?? die("no config — run `dlb setup`");
+  const cfg = readConfig() ?? die("no config — run `twin setup`");
   if (sub === "info" || !sub) {
-    if (!cfg.push.topic) die("no ntfy topic — run `dlb setup` again");
+    if (!cfg.push.topic) die("no ntfy topic — run `twin setup` again");
     console.log(`provider: ntfy\nserver:   ${cfg.push.server}\ntopic:    ${cfg.push.topic}`);
     console.log(`\nsubscribe on your phone: ntfy app → + → ${cfg.push.topic} @ ${cfg.push.server}`);
     return;
@@ -319,21 +320,21 @@ async function cmdPush(sub: string | undefined): Promise<void> {
     const { localHostName } = await import("../src/twin/manager.ts");
     await push(cfg.push, {
       host: localHostName(),
-      title: "devin-local-bridge",
+      title: "devin-twin",
       body: "test notification — if you see this, push works",
       kind: "stop",
     });
     console.log(`sent test notification to ${cfg.push.server}/${cfg.push.topic}`);
     return;
   }
-  die("usage: dlb push info|test");
+  die("usage: twin push info|test");
 }
 
 async function cmdStart(): Promise<void> {
-  const cfg = readConfig() ?? die(`no config — run \`dlb setup\` first`);
-  const token = readToken() ?? die("no token — run `dlb setup`");
+  const cfg = readConfig() ?? die(`no config — run \`twin setup\` first`);
+  const token = readToken() ?? die("no token — run `twin setup`");
   const oldPid = readPid(BRIDGE_PID_FILE);
-  if (oldPid && pidAlive(oldPid)) die(`bridge already running (pid ${oldPid}) — use \`dlb restart\``);
+  if (oldPid && pidAlive(oldPid)) die(`bridge already running (pid ${oldPid}) — use \`twin restart\``);
 
   ensureDirs();
   const fd = openSync(BRIDGE_LOG, "a");
@@ -539,7 +540,7 @@ async function cmdDoctor(): Promise<void> {
   ok("credentials key", hasKey, hasKey ? "found" : "missing");
 
   const cfg = readConfig();
-  ok("config.toml", Boolean(cfg && cfg.workspaces.length), cfg ? `port ${cfg.port}, ${cfg.workspaces.length} workspace(s)` : "run dlb setup");
+  ok("config.toml", Boolean(cfg && cfg.workspaces.length), cfg ? `port ${cfg.port}, ${cfg.workspaces.length} workspace(s)` : "run twin setup");
   ok("token", (readToken()?.length ?? 0) >= 32);
 
   if (cfg) {
@@ -569,6 +570,8 @@ async function cmdDoctor(): Promise<void> {
 
 // ---- main ----
 
+migrateLegacyStateDir();
+
 const argv = process.argv.slice(2);
 const cmd = argv[0];
 const rest = argv.slice(1).filter((a) => a !== "--json");
@@ -596,7 +599,7 @@ switch (cmd) {
     await cmdUrl(wantsJson);
     break;
   case "token":
-    if (sub !== "rotate") die("usage: dlb token rotate");
+    if (sub !== "rotate") die("usage: twin token rotate");
     await cmdTokenRotate();
     break;
   case "logs":
@@ -619,7 +622,7 @@ switch (cmd) {
     break;
   default:
     console.log(
-      "usage: dlb <setup|start|stop|restart|status|url|token rotate|logs|doctor|hooks install|uninstall|status|remote on|off|status|twin list|archive|push info|test>",
+      "usage: twin <setup|start|stop|restart|status|url|token rotate|logs|doctor|hooks install|uninstall|status|remote on|off|status|twin list|archive|push info|test>",
     );
     process.exit(cmd ? 1 : 0);
 }

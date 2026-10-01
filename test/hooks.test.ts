@@ -373,7 +373,7 @@ test("hooks install merges into devin config preserving keys; status/uninstall w
   writeFileSync(cfgPath, JSON.stringify({ devin: { org_id: "o1" }, hooks: { Stop: [{ hooks: [{ type: "command", command: "/other/hook.sh Stop" }] }] } }));
   const env = { ...process.env, DLB_DEVIN_CONFIG: cfgPath, DLB_STATE_DIR: dir };
   const run = (...a: string[]) =>
-    Bun.spawnSync(["bun", "bin/dlb.ts", ...a], { cwd: join(import.meta.dir, ".."), env });
+    Bun.spawnSync(["bun", "bin/twin.ts", ...a], { cwd: join(import.meta.dir, ".."), env });
   const st = run("hooks", "install");
   expect(st.exitCode).toBe(0);
   const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
@@ -381,8 +381,8 @@ test("hooks install merges into devin config preserving keys; status/uninstall w
   const stopArr = cfg.hooks.Stop as Array<{ hooks: Array<{ command: string }> }>;
   expect(stopArr).toHaveLength(2); // ours + existing
   expect(cfg.hooks.PermissionRequest[0].hooks[0].timeout).toBe(610);
-  expect(cfg.hooks.PermissionRequest[0].hooks[0].command).toContain("dlb-hook.sh PermissionRequest 600");
-  expect(existsSync(`${cfgPath}.bak-dlb-${""}`)).toBe(false); // backup name has ts
+  expect(cfg.hooks.PermissionRequest[0].hooks[0].command).toContain("twin-hook.sh PermissionRequest 600");
+  expect(existsSync(`${cfgPath}.bak-twin-${""}`)).toBe(false); // backup name has ts
   // rerun is idempotent
   run("hooks", "install");
   const cfg2 = JSON.parse(readFileSync(cfgPath, "utf8"));
