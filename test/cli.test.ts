@@ -1,5 +1,5 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, statSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -68,6 +68,12 @@ test("parseQuickTunnelUrl extracts trycloudflare URL from log", async () => {
   expect(parseQuickTunnelUrl(log)).toBe("https://abc-def-123.trycloudflare.com");
   writeFileSync(log, "nothing here");
   expect(parseQuickTunnelUrl(log)).toBeNull();
+  // offset: only bytes written after spawn count (stale URL from a previous run ignored)
+  writeFileSync(log, "INF |  https://old-run.trycloudflare.com  |\n");
+  const off = statSync(log).size;
+  expect(parseQuickTunnelUrl(log, off)).toBeNull();
+  appendFileSync(log, "INF |  https://new-run.trycloudflare.com  |\n");
+  expect(parseQuickTunnelUrl(log, off)).toBe("https://new-run.trycloudflare.com");
 });
 
 test("getTunnel selects provider", async () => {

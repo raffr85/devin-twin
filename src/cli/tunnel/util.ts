@@ -1,4 +1,4 @@
-import { existsSync, openSync, readFileSync } from "node:fs";
+import { existsSync, openSync, readFileSync, statSync } from "node:fs";
 
 export function which(cmd: string): string | null {
   try {
@@ -21,12 +21,21 @@ export function spawnLogged(argv: string[], logFile: string): number {
   return proc.pid;
 }
 
-export function parseQuickTunnelUrl(logFile: string): string | null {
+export function parseQuickTunnelUrl(logFile: string, offset = 0): string | null {
   try {
-    const m = readFileSync(logFile, "utf8").match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/g);
+    const text = readFileSync(logFile, "utf8").slice(offset);
+    const m = text.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/g);
     return m ? m[m.length - 1]! : null;
   } catch {
     return null;
+  }
+}
+
+export function fileSize(f: string): number {
+  try {
+    return statSync(f).size;
+  } catch {
+    return 0;
   }
 }
 
