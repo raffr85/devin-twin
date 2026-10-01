@@ -10,6 +10,7 @@ export type Config = {
   devinArgs: string[];
   apiKey: string | null;
   turnTtlMs: number;
+  hookToken: string | null;
 };
 
 function readApiKeyFromCredentials(): string | null {
@@ -57,5 +58,22 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     console.error("BRIDGE_TURN_TTL_MIN must be a positive number of minutes");
     process.exit(1);
   }
-  return { token, port, workspaces, devinBin, devinArgs, apiKey, turnTtlMs: ttlMin * 60_000 };
+  let hookToken = env.BRIDGE_HOOK_TOKEN ?? null;
+  if (!hookToken) {
+    const dir =
+      env.DLB_STATE_DIR ?? join(homedir(), ".local/share/devin-local-bridge");
+    try {
+      hookToken = readFileSync(join(dir, "hook_token"), "utf8").trim() || null;
+    } catch {}
+  }
+  return {
+    token,
+    port,
+    workspaces,
+    devinBin,
+    devinArgs,
+    apiKey,
+    turnTtlMs: ttlMin * 60_000,
+    hookToken,
+  };
 }

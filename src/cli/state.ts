@@ -10,6 +10,11 @@ export const BRIDGE_PID_FILE = join(STATE_DIR, "bridge.pid");
 export const TUNNEL_PID_FILE = join(STATE_DIR, "tunnel.pid");
 export const STATE_FILE = join(STATE_DIR, "state.json");
 export const AUDIT_FILE = join(STATE_DIR, "audit.jsonl");
+export const HOOK_TOKEN_FILE = join(STATE_DIR, "hook_token");
+export const REMOTE_FILE = join(STATE_DIR, "remote.json");
+export const QUEUE_FILE = join(STATE_DIR, "queue.json");
+export const TWINS_FILE = join(STATE_DIR, "twins.json");
+export const EVENTS_DIR = join(STATE_DIR, "events");
 export const LOGS_DIR = join(STATE_DIR, "logs");
 export const BRIDGE_LOG = join(LOGS_DIR, "bridge.log");
 export const TUNNEL_LOG = join(LOGS_DIR, "tunnel.log");
@@ -26,16 +31,28 @@ export type CliConfig = {
     hostname?: string;
     publicUrl?: string;
   };
+  push: {
+    provider: "ntfy" | "none";
+    server: string;
+    topic: string;
+  };
+  twin: {
+    maxAcuLimit: number;
+    archiveOnEnd: boolean;
+  };
 };
 
 export function ensureDirs(): void {
   mkdirSync(LOGS_DIR, { recursive: true });
+  mkdirSync(EVENTS_DIR, { recursive: true });
 }
 
 export function readConfig(): CliConfig | null {
   if (!existsSync(CONFIG_FILE)) return null;
   const raw = Bun.TOML.parse(readFileSync(CONFIG_FILE, "utf8")) as Record<string, unknown>;
   const tunnel = (raw.tunnel ?? {}) as Record<string, unknown>;
+  const push = (raw.push ?? {}) as Record<string, unknown>;
+  const twin = (raw.twin ?? {}) as Record<string, unknown>;
   return {
     port: Number(raw.port ?? 8787),
     workspaces: (raw.workspaces as string[]) ?? [],
@@ -45,6 +62,15 @@ export function readConfig(): CliConfig | null {
       name: tunnel.name as string | undefined,
       hostname: tunnel.hostname as string | undefined,
       publicUrl: tunnel.public_url as string | undefined,
+    },
+    push: {
+      provider: (push.provider as "ntfy" | "none") ?? "none",
+      server: (push.server as string) ?? "https://ntfy.sh",
+      topic: (push.topic as string) ?? "",
+    },
+    twin: {
+      maxAcuLimit: Number(twin.max_acu_limit ?? 2),
+      archiveOnEnd: (twin.archive_on_end as boolean) ?? true,
     },
   };
 }
@@ -56,7 +82,37 @@ export function writeConfig(cfg: CliConfig): void {
   if (cfg.tunnel.name) out += `name = ${JSON.stringify(cfg.tunnel.name)}\n`;
   if (cfg.tunnel.hostname) out += `hostname = ${JSON.stringify(cfg.tunnel.hostname)}\n`;
   if (cfg.tunnel.publicUrl) out += `public_url = ${JSON.stringify(cfg.tunnel.publicUrl)}\n`;
+  out += `\n[push]\nprovider = "${cfg.push.provider}"\nserver = "${cfg.push.server}"\ntopic = "${cfg.push.topic}"\n`;
+  out += `\n[twin]\nmax_acu_limit = ${cfg.twin.maxAcuLimit}\narchive_on_end = ${cfg.twin.archiveOnEnd}\n`;
   writeFileSync(CONFIG_FILE, out);
+}
+
+export function readHookToken(): string | null {
+  if (!existsSync(HOOK_TOKEN_FILE)) return null;
+  const t = readFileSync(HOOK_TOKEN_FILE, "utf8").trim();
+  return t || null;
+}
+
+export function writeHookToken(token: string): void {
+  ensureDirs();
+  writeFileSync(HOOK_TOKEN_FILE, token);
+  chmodSync(HOOK_TOKEN_FILE, 0o600);
+}
+
+export type RemoteState = { on: boolean; holdMinutes: number };
+
+export function readRemote(): RemoteState {
+  try {
+    const r = JSON.parse(readFileSync(REMOTE_FILE, "utf8"));
+    return { on: Boolean(r.on), holdMinutes: Number(r.holdMinutes ?? 10) };
+  } catch {
+    return { on: false, holdMinutes: 10 };
+  }
+}
+
+export function writeRemote(r: RemoteState): void {
+  ensureDirs();
+  writeFileSync(REMOTE_FILE, JSON.stringify(r));
 }
 
 export function readToken(): string | null {

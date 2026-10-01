@@ -23,8 +23,8 @@ export function spawnLogged(argv: string[], logFile: string): number {
 
 export function parseQuickTunnelUrl(logFile: string): string | null {
   try {
-    const m = readFileSync(logFile, "utf8").match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
-    return m ? m[0] : null;
+    const m = readFileSync(logFile, "utf8").match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/g);
+    return m ? m[m.length - 1]! : null;
   } catch {
     return null;
   }

@@ -6,9 +6,47 @@ import { loadConfig, type Config } from "../src/config.ts";
 import { AcpPool } from "../src/acp/pool.ts";
 import { HandleMap } from "../src/handles.ts";
 import { startHttp } from "../src/http.ts";
+import { EventStore } from "../src/events.ts";
+import { InstructionQueue } from "../src/queue.ts";
+import { HookRuntime } from "../src/hooks.ts";
+import { TwinManager } from "../src/twin/manager.ts";
+import type { Ctx } from "../src/mcp/server.ts";
 
 const TOKEN = "test-token-" + "x".repeat(40);
 const FAKE = join(import.meta.dir, "fake-acp-agent.ts");
+
+let ctxCounter = 0;
+export function makeCtx(
+  cfg: Config,
+  pool: AcpPool,
+  handles = new HandleMap(),
+  remote = { on: false, holdMinutes: 10 },
+  permHoldMs = 540_000,
+): { ctx: Ctx; remote: { on: boolean; holdMinutes: number } } {
+  const i = ++ctxCounter;
+  const events = new EventStore(join(dir, `ev-${i}`));
+  const queue = new InstructionQueue(join(dir, `q-${i}.json`));
+  const twin = new TwinManager(join(dir, `twins-${i}.json`), null, {
+    provider: "none",
+    server: "",
+    topic: "",
+  }, { maxAcuLimit: 2, archiveOnEnd: true, isRemoteOn: () => remote.on });
+  const hooks = new HookRuntime(events, queue, twin, handles, () => remote, permHoldMs);
+  return {
+    ctx: {
+      cfg,
+      pool,
+      handles,
+      events,
+      queue,
+      hooks,
+      remote: () => remote,
+      setRemote: (r) => Object.assign(remote, r),
+      twin,
+    },
+    remote,
+  };
+}
 
 let dir: string;
 let answerFile: string;
@@ -30,7 +68,7 @@ beforeAll(() => {
     BRIDGE_PORT: "0",
   });
   pool = new AcpPool(cfg);
-  server = startHttp({ cfg, pool, handles: new HandleMap() });
+  server = startHttp(makeCtx(cfg, pool).ctx);
   base = `http://127.0.0.1:${server.port}`;
 });
 
@@ -72,7 +110,7 @@ test("rate limit: 61st authenticated request in a minute is 429", async () => {
   const token = TOKEN + "-rl";
   const cfg2 = { ...cfg, token };
   const pool2 = new AcpPool(cfg2);
-  const srv = startHttp({ cfg: cfg2, pool: pool2, handles: new HandleMap() });
+  const srv = startHttp(makeCtx(cfg2, pool2).ctx);
   const b = `http://127.0.0.1:${srv.port}`;
   try {
     let last = 0;
@@ -127,9 +165,11 @@ test("integration: tools/list + session flow with fake agent", async () => {
   const names = tools.tools.map((t) => t.name).sort();
   expect(names).toEqual([
     "mac_answer_question",
+    "mac_get_events",
     "mac_get_pending_actions",
     "mac_get_session",
     "mac_list_sessions",
+    "mac_remote_mode",
     "mac_respond_permission",
     "mac_send_message",
     "mac_status",
@@ -156,7 +196,12 @@ test("integration: tools/list + session flow with fake agent", async () => {
     session: locked.handle,
     text: "hi",
   })).parsed;
-  expect(lockRes).toEqual({ accepted: false, reason: "locked_by_other_client" });
+  // locked sessions get queued for hook delivery instead of an ACP send
+  expect(lockRes).toEqual({
+    accepted: true,
+    delivery: "queued_for_hook",
+    note: "session is driven locally; instruction will be delivered on the next Stop/UserPromptSubmit hook",
+  });
 
   // locked session still replays history before erroring -> read-only transcript
   const lockedGet = (await call(client, "mac_get_session", { session: locked.handle })).parsed;
@@ -216,7 +261,7 @@ test("turn TTL: hanging turn is cancelled, owner released, audited", async () =>
   });
   const pool2 = new AcpPool(cfg2);
   const handles2 = new HandleMap();
-  const srv2 = startHttp({ cfg: cfg2, pool: pool2, handles: handles2 });
+  const srv2 = startHttp(makeCtx(cfg2, pool2, handles2).ctx);
   try {
     const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
     const { StreamableHTTPClientTransport } = await import(

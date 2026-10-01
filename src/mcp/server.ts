@@ -6,6 +6,12 @@ import { basename } from "node:path";
 import type { Config } from "../config.ts";
 import type { AcpPool } from "../acp/pool.ts";
 import type { SessionInfo } from "../acp/process.ts";
+import type { EventStore } from "../events.ts";
+import type { InstructionQueue } from "../queue.ts";
+import type { HookRuntime } from "../hooks.ts";
+import type { RemoteReader } from "../hooks.ts";
+import type { TwinManager } from "../twin/manager.ts";
+import type { RemoteState } from "../cli/state.ts";
 import { HandleMap } from "../handles.ts";
 import { foldUpdates, summarize, deriveState } from "../history.ts";
 import { listPending, pendingCount, respond } from "../pending.ts";
@@ -15,6 +21,12 @@ export type Ctx = {
   cfg: Config;
   pool: AcpPool;
   handles: HandleMap;
+  events: EventStore;
+  queue: InstructionQueue;
+  hooks: HookRuntime;
+  remote: RemoteReader;
+  setRemote: (r: RemoteState) => void;
+  twin: TwinManager;
 };
 
 function realpath(p: string): string {
@@ -99,6 +111,8 @@ export function createMcpServer(ctx: Ctx): McpServer {
         const w = workspaceOf(ctx.cfg, s.cwd)!;
         const owned = ctx.pool.isOwned(s.sessionId);
         const d = deriveState([], { isLocked: s.isLocked, updatedAt: s.updatedAt });
+        ctx.events.setTitle(s.sessionId, s.title);
+        const live = ctx.events.live(s.sessionId);
         return {
           handle: ctx.handles.sessionHandle(s.sessionId),
           title: s.title,
@@ -107,6 +121,7 @@ export function createMcpServer(ctx: Ctx): McpServer {
           isLocked: s.isLocked,
           updatedAt: s.updatedAt ?? null,
           ownedByBridge: owned,
+          ...(live.lastSeenAt ? { live } : {}),
         };
       });
       return toJson(out);
@@ -188,9 +203,18 @@ export function createMcpServer(ctx: Ctx): McpServer {
     try {
       const listed = (await listVisibleSessions(ctx)).find((s) => s.sessionId === sessionId);
       if (!listed) return errorResult("session not found or outside allowed workspaces");
-      if (listed.isLocked && !ctx.pool.isOwned(sessionId)) {
-        audit({ tool: "mac_send_message", session, outcome: "locked_by_other_client" });
-        return toJson({ accepted: false, reason: "locked_by_other_client" });
+      if (!ctx.pool.isOwned(sessionId)) {
+        const hasHooks = ctx.events.hasRecentActivity(sessionId, 10 * 60_000);
+        if (listed.isLocked || hasHooks) {
+          ctx.queue.enqueue(sessionId, text);
+          ctx.events.append(sessionId, "instruction_queued", { text });
+          audit({ tool: "mac_send_message", session, outcome: "queued_for_hook" });
+          return toJson({
+            accepted: true,
+            delivery: "queued_for_hook",
+            note: "session is driven locally; instruction will be delivered on the next Stop/UserPromptSubmit hook",
+          });
+        }
       }
       const r = await ctx.pool.sendMessage(sessionId, listed.cwd, text);
       audit({ tool: "mac_send_message", session, text, outcome: r.ok ? "accepted" : r.reason });
@@ -211,8 +235,18 @@ export function createMcpServer(ctx: Ctx): McpServer {
     },
   }, async ({ action, choice }) => {
     const pending = listPending().find((p) => p.handle === action);
-    if (!pending || pending.kind !== "permission") {
+    if (!pending || (pending.kind !== "permission" && pending.kind !== "hook_permission")) {
       return errorResult(`unknown or expired action handle: ${action}`);
+    }
+    if (pending.kind === "hook_permission") {
+      const approved = choice !== "reject";
+      const ok = respond(action, { approved, choice });
+      audit({ tool: "mac_respond_permission", action, outcome: ok ? choice : "expired" });
+      if (!ok) return errorResult("action expired");
+      return toJson({
+        ok: true,
+        ...(choice === "allow_session" ? { note: "hook permissions are one-shot; approved once" } : {}),
+      });
     }
     const wanted =
       choice === "reject"
@@ -245,6 +279,50 @@ export function createMcpServer(ctx: Ctx): McpServer {
     audit({ tool: "mac_answer_question", action, outcome: ok ? "accepted" : "expired" });
     if (!ok) return errorResult("action expired");
     return toJson({ ok: true });
+  });
+
+  server.registerTool("mac_get_events", {
+    description:
+      "Live event feed of a local Devin session, sourced from lifecycle hooks on this Mac (works even when the session is open in Devin Desktop). Pass `since` = previous nextSince to get only new events.",
+    inputSchema: {
+      session: z.string().describe("session handle"),
+      since: z.number().int().min(0).optional().describe("seq cursor; only events after this"),
+      limit: z.number().int().min(1).max(200).optional(),
+    },
+  }, async ({ session, since, limit }) => {
+    const sessionId = ctx.handles.sessionIdFor(session);
+    if (!sessionId) return errorResult(`unknown session handle: ${session}`);
+    const { events, nextSince } = ctx.events.list(sessionId, since ?? 0, limit ?? 50);
+    const live = ctx.events.live(sessionId);
+    const fmt = new Intl.DateTimeFormat("pt-BR", {
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    return toJson({
+      handle: session,
+      title: live.title,
+      live,
+      events,
+      nextSince,
+      pendingActions: listPending(sessionId),
+      localTime: fmt.format(new Date()),
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    });
+  });
+
+  server.registerTool("mac_remote_mode", {
+    description:
+      "Get or set remote mode: when on, Stop hooks on this Mac hold briefly waiting for queued phone instructions, and Devin Twins (cloud narrators) + push are enabled.",
+    inputSchema: {
+      on: z.boolean().optional().describe("set remote mode on/off; omit to just read"),
+    },
+  }, async ({ on }) => {
+    const cur = ctx.remote();
+    if (on === undefined) return toJson(cur);
+    ctx.setRemote({ ...cur, on });
+    audit({ tool: "mac_remote_mode", outcome: on ? "on" : "off" });
+    return toJson({ ...cur, on });
   });
 
   return server;

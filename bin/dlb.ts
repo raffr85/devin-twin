@@ -1,26 +1,34 @@
 #!/usr/bin/env bun
 import { parseArgs } from "node:util";
 import { randomBytes } from "node:crypto";
-import { existsSync, openSync, readFileSync } from "node:fs";
+import { existsSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import * as readline from "node:readline/promises";
+import { homedir } from "node:os";
 import {
   AUDIT_FILE,
   BRIDGE_LOG,
   BRIDGE_PID_FILE,
+  HOOK_TOKEN_FILE,
+  REMOTE_FILE,
+  TWINS_FILE,
   TUNNEL_LOG,
   TUNNEL_PID_FILE,
   CONFIG_FILE,
   ensureDirs,
   pidAlive,
   readConfig,
+  readHookToken,
   readPid,
+  readRemote,
   readState,
   readToken,
   removePid,
   writeConfig,
+  writeHookToken,
   writePid,
+  writeRemote,
   writeState,
   writeToken,
   type CliConfig,
@@ -102,6 +110,8 @@ async function cmdSetup(args: string[]): Promise<void> {
       hostname: values.hostname ?? prev?.tunnel.hostname,
       publicUrl: values["public-url"] ?? prev?.tunnel.publicUrl,
     },
+    push: prev?.push ?? { provider: "none", server: "https://ntfy.sh", topic: "" },
+    twin: prev?.twin ?? { maxAcuLimit: 2, archiveOnEnd: true },
   };
 
   if (provider === "cloudflare") {
@@ -118,12 +128,185 @@ async function cmdSetup(args: string[]): Promise<void> {
     if (!chk.ok) die(`${chk.hint}`, 2);
   }
 
+  if (cfg.push.provider === "none" || !cfg.push.topic) {
+    cfg.push = {
+      provider: "ntfy",
+      server: cfg.push.server || "https://ntfy.sh",
+      topic: cfg.push.topic || `dlb-${randomBytes(6).toString("hex")}`,
+    };
+  }
   writeConfig(cfg);
   if (!readToken()) {
     writeToken(randomBytes(32).toString("hex"));
     console.log("generated new token");
   }
+  if (!readHookToken()) {
+    writeHookToken(randomBytes(32).toString("hex"));
+    console.log("generated new hook token");
+  }
   console.log(`wrote ${CONFIG_FILE}`);
+}
+
+// ---- hooks ----
+
+const HOOK_SCRIPT = join(REPO, "hooks", "dlb-hook.sh");
+const DEVIN_CONFIG =
+  process.env.DLB_DEVIN_CONFIG ?? join(homedir(), ".config/devin/config.json");
+
+function hooksBlock(): Record<string, Array<unknown>> {
+  const cmd = (ev: string, maxTime = 3, timeout?: number) => ({
+    hooks: [
+      {
+        type: "command",
+        command: `${HOOK_SCRIPT} ${ev}${maxTime !== 3 ? ` ${maxTime}` : ""}`,
+        ...(timeout ? { timeout } : {}),
+      },
+    ],
+    ...(ev === "PermissionRequest" || ev === "PostToolUse" ? { matcher: "" } : {}),
+  });
+  return {
+    SessionStart: [cmd("SessionStart")],
+    UserPromptSubmit: [cmd("UserPromptSubmit")],
+    PostToolUse: [cmd("PostToolUse")],
+    PermissionRequest: [cmd("PermissionRequest", 600, 610)],
+    Stop: [cmd("Stop", 900, 910)],
+    SessionEnd: [cmd("SessionEnd")],
+  };
+}
+
+function isDlbHookEntry(e: unknown): boolean {
+  const hooks = (e as { hooks?: Array<{ command?: string }> }).hooks ?? [];
+  return hooks.some((h) => typeof h.command === "string" && h.command.includes("dlb-hook.sh"));
+}
+
+async function cmdHooks(sub: string | undefined): Promise<void> {
+  const cfg = JSON.parse(
+    existsSync(DEVIN_CONFIG) ? readFileSync(DEVIN_CONFIG, "utf8") : "{}",
+  ) as Record<string, unknown>;
+  const hooks = (cfg.hooks ?? {}) as Record<string, unknown[]>;
+
+  if (sub === "status") {
+    const installed = Object.values(hooks).some((arr) => arr.some(isDlbHookEntry));
+    console.log(`hooks installed: ${installed}`);
+    console.log(`hook token: ${readHookToken() ? "present" : "missing"}`);
+    return;
+  }
+  if (sub === "install") {
+    if (!readHookToken()) writeHookToken(randomBytes(32).toString("hex"));
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    if (existsSync(DEVIN_CONFIG))
+      writeFileSync(`${DEVIN_CONFIG}.bak-dlb-${stamp}`, readFileSync(DEVIN_CONFIG));
+    const ours = hooksBlock();
+    for (const [ev, entries] of Object.entries(ours)) {
+      const existing = (hooks[ev] ?? []).filter((e) => !isDlbHookEntry(e));
+      hooks[ev] = [...existing, ...entries];
+    }
+    cfg.hooks = hooks;
+    writeFileSync(DEVIN_CONFIG, JSON.stringify(cfg, null, 2));
+    console.log(`installed hooks into ${DEVIN_CONFIG} (backup: config.json.bak-dlb-${stamp})`);
+    return;
+  }
+  if (sub === "uninstall") {
+    for (const ev of Object.keys(hooks)) {
+      hooks[ev] = hooks[ev]!.filter((e) => !isDlbHookEntry(e));
+      if (!hooks[ev]!.length) delete hooks[ev];
+    }
+    cfg.hooks = hooks;
+    writeFileSync(DEVIN_CONFIG, JSON.stringify(cfg, null, 2));
+    console.log("dlb hooks removed");
+    return;
+  }
+  die("usage: dlb hooks install|uninstall|status");
+}
+
+// ---- remote ----
+
+async function cmdRemote(sub: string | undefined, rest: string[]): Promise<void> {
+  const { values } = parseArgs({ args: rest, options: { "hold-min": { type: "string" } } });
+  const cur = readRemote();
+  if (sub === "status" || !sub) {
+    console.log(JSON.stringify(cur));
+    return;
+  }
+  if (sub === "on" || sub === "off") {
+    const next = {
+      on: sub === "on",
+      holdMinutes: values["hold-min"] ? Number(values["hold-min"]) : cur.holdMinutes,
+    };
+    writeRemote(next);
+    console.log(`remote ${next.on ? "on" : "off"} (hold ${next.holdMinutes} min)`);
+    return;
+  }
+  die("usage: dlb remote on|off|status [--hold-min N]");
+}
+
+// ---- twins ----
+
+async function cmdTwin(sub: string | undefined, arg: string | undefined): Promise<void> {
+  const list = existsSync(TWINS_FILE)
+    ? (JSON.parse(readFileSync(TWINS_FILE, "utf8")) as Record<string, { devinId: string; url: string; archived: boolean; createdAt: string }>)
+    : {};
+  if (sub === "list" || !sub) {
+    const entries = Object.entries(list);
+    if (!entries.length) console.log("no twins");
+    for (const [sid, t] of entries) {
+      console.log(`${t.archived ? "[archived] " : ""}${t.devinId}  ${t.url}  (${sid})`);
+    }
+    return;
+  }
+  if (sub === "archive") {
+    const { DevinApi, devinApiKey, devinOrgId } = await import("../src/twin/api.ts");
+    const key = devinApiKey();
+    const org = devinOrgId();
+    if (!key || !org) die("devin API credentials not found");
+    const api = new DevinApi(key, org);
+    const targets =
+      arg === "all"
+        ? Object.keys(list).filter((k) => !list[k]!.archived)
+        : arg
+          ? [arg]
+          : die("usage: dlb twin archive <localSessionId|all>");
+    for (const sid of targets) {
+      const t = list[sid];
+      if (!t) {
+        console.log(`no twin for ${sid}`);
+        continue;
+      }
+      if (!t.archived) {
+        await api.archive(t.devinId);
+        t.archived = true;
+      }
+      console.log(`archived ${t.devinId}`);
+    }
+    writeFileSync(TWINS_FILE, JSON.stringify(list, null, 2));
+    return;
+  }
+  die("usage: dlb twin list|archive <localSessionId|all>");
+}
+
+// ---- push ----
+
+async function cmdPush(sub: string | undefined): Promise<void> {
+  const cfg = readConfig() ?? die("no config — run `dlb setup`");
+  if (sub === "info" || !sub) {
+    if (!cfg.push.topic) die("no ntfy topic — run `dlb setup` again");
+    console.log(`provider: ntfy\nserver:   ${cfg.push.server}\ntopic:    ${cfg.push.topic}`);
+    console.log(`\nsubscribe on your phone: ntfy app → + → ${cfg.push.topic} @ ${cfg.push.server}`);
+    return;
+  }
+  if (sub === "test") {
+    const { push } = await import("../src/push.ts");
+    const { localHostName } = await import("../src/twin/manager.ts");
+    await push(cfg.push, {
+      host: localHostName(),
+      title: "devin-local-bridge",
+      body: "test notification — if you see this, push works",
+      kind: "stop",
+    });
+    console.log(`sent test notification to ${cfg.push.server}/${cfg.push.topic}`);
+    return;
+  }
+  die("usage: dlb push info|test");
 }
 
 async function cmdStart(): Promise<void> {
@@ -227,6 +410,11 @@ async function cmdStatus(json: boolean): Promise<void> {
     }
   }
 
+  let twins: Record<string, { archived: boolean; url: string }> = {};
+  try {
+    twins = JSON.parse(readFileSync(TWINS_FILE, "utf8"));
+  } catch {}
+  const remote = readRemote();
   const report = {
     bridge: { pid: bridgePid, alive: bridgeAlive, port: cfg?.port, healthy: Boolean(hz?.ok) },
     tunnel: {
@@ -235,6 +423,10 @@ async function cmdStatus(json: boolean): Promise<void> {
       alive: cfg?.tunnel.provider === "none" ? null : tunnelAlive,
       publicUrl: state.publicUrl ?? null,
     },
+    remote,
+    twins: Object.fromEntries(
+      Object.entries(twins).map(([k, v]) => [k, { archived: v.archived, url: v.url }]),
+    ),
     lastRequestAt: hz?.lastRequestAt ?? state.lastRequestAt ?? null,
     lastAudit,
     mac,
@@ -244,6 +436,9 @@ async function cmdStatus(json: boolean): Promise<void> {
   } else {
     console.log(`bridge:  ${bridgeAlive ? `pid ${bridgePid} :${cfg?.port} ${hz?.ok ? "healthy" : "unhealthy"}` : "not running"}`);
     console.log(`tunnel:  ${cfg?.tunnel.provider ?? "?"}${tunnelPid ? ` pid ${tunnelPid} ${tunnelAlive ? "alive" : "dead"}` : ""} ${state.publicUrl ?? ""}`);
+    console.log(`remote:  ${remote.on ? `on (hold ${remote.holdMinutes}m)` : "off"}`);
+    const activeTwins = Object.values(twins).filter((t) => !t.archived).length;
+    console.log(`twins:   ${activeTwins} active / ${Object.keys(twins).length} total`);
     console.log(`last req: ${report.lastRequestAt ?? "-"}`);
     if (lastAudit) console.log(`last audit: ${lastAudit.slice(0, 200)}`);
     if (mac && typeof mac === "object") console.log(`mac_status: ${JSON.stringify(mac)}`);
@@ -376,12 +571,24 @@ switch (cmd) {
   case "logs":
     await cmdLogs(rest);
     break;
+  case "hooks":
+    await cmdHooks(sub);
+    break;
+  case "remote":
+    await cmdRemote(sub, rest.slice(1));
+    break;
+  case "twin":
+    await cmdTwin(sub, rest[1]);
+    break;
+  case "push":
+    await cmdPush(sub);
+    break;
   case "doctor":
     await cmdDoctor();
     break;
   default:
     console.log(
-      "usage: dlb <setup|start|stop|restart|status|url|token rotate|logs|doctor>",
+      "usage: dlb <setup|start|stop|restart|status|url|token rotate|logs|doctor|hooks install|uninstall|status|remote on|off|status|twin list|archive|push info|test>",
     );
     process.exit(cmd ? 1 : 0);
 }

@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -54,6 +54,8 @@ function json(status: number, body: unknown): Response {
   });
 }
 
+const TUNNEL_HEADERS = ["cf-ray", "cf-connecting-ip", "x-forwarded-for"];
+
 export function startHttp(ctx: Ctx): ReturnType<typeof Bun.serve> {
   const cfg: Config = ctx.cfg;
   return Bun.serve({
@@ -63,6 +65,40 @@ export function startHttp(ctx: Ctx): ReturnType<typeof Bun.serve> {
       const url = new URL(req.url);
       if (url.pathname === "/healthz" && req.method === "GET") {
         return json(200, { ok: true, lastRequestAt });
+      }
+      if (url.pathname === "/hook" && req.method === "POST") {
+        // defense in depth: hooks only come from localhost; reject anything a
+        // tunnel/proxy would add (bind is already 127.0.0.1)
+        if (TUNNEL_HEADERS.some((h) => req.headers.has(h))) {
+          return json(403, { error: "forbidden" });
+        }
+        const hookTok = req.headers.get("x-dlb-hook-token") ?? "";
+        if (!cfg.hookToken || !hookTok || !tokenMatches(hookTok, cfg.hookToken)) {
+          return json(401, { error: "unauthorized" });
+        }
+        const cwd = req.headers.get("x-dlb-cwd") ?? "";
+        const inAllowlist = ctx.cfg.workspaces.some((w) => {
+          try {
+            const rw = realpathSync(w);
+            const rc = realpathSync(cwd);
+            return rc === rw || rc.startsWith(rw.endsWith("/") ? rw : rw + "/");
+          } catch {
+            return cwd === w || cwd.startsWith(w.endsWith("/") ? w : w + "/");
+          }
+        });
+        if (!inAllowlist) return json(200, {});
+        let body: Record<string, unknown> = {};
+        try {
+          body = (await req.json()) as Record<string, unknown>;
+        } catch {
+          return json(400, { error: "bad json" });
+        }
+        try {
+          const out = await ctx.hooks.handle(url.searchParams.get("event") ?? "", body, cwd);
+          return json(200, out);
+        } catch (e) {
+          return json(500, { error: e instanceof Error ? e.message : String(e) });
+        }
       }
       if (url.pathname !== "/mcp" || !["POST", "GET", "DELETE"].includes(req.method)) {
         return json(404, { error: "not found" });

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 
-export type PendingKind = "permission" | "elicitation";
+export type PendingKind = "permission" | "elicitation" | "hook_permission";
 
 export type PendingOption = { id: string; label: string; kind: string };
 
@@ -60,6 +60,29 @@ export function addPendingPermission(
   return { handle, promise };
 }
 
+// Permission raised by a lifecycle hook (not ACP): options are approve/deny only.
+export function addPendingHookPermission(
+  sessionId: string,
+  title: string,
+): { handle: string; promise: Promise<unknown> } {
+  const handle = newHandle();
+  let resolve!: (v: unknown) => void;
+  const promise = new Promise<unknown>((r) => (resolve = r));
+  entries.set(handle, {
+    handle,
+    sessionId,
+    kind: "hook_permission",
+    createdAt: new Date().toISOString(),
+    title,
+    options: [
+      { id: "approve", label: "Approve", kind: "allow_once" },
+      { id: "deny", label: "Deny", kind: "reject_once" },
+    ],
+    resolve,
+  });
+  return { handle, promise };
+}
+
 export function addPendingElicitation(
   sessionId: string,
   rawParams: unknown,
@@ -96,6 +119,13 @@ export function respond(handle: string, answer: unknown): boolean {
   entries.delete(handle);
   e.resolve(answer);
   return true;
+}
+
+export function drop(handle: string): void {
+  const e = entries.get(handle);
+  if (!e) return;
+  entries.delete(handle);
+  e.resolve({ outcome: { outcome: "cancelled" } });
 }
 
 export function dropForSession(sessionId: string): void {

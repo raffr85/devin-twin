@@ -16,13 +16,25 @@ afterAll(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+function mkCfg(over: Record<string, unknown> = {}) {
+  return {
+    port: 8787,
+    workspaces: ["/tmp"],
+    turnTtlMin: 30,
+    tunnel: { provider: "quick" as const },
+    push: { provider: "none" as const, server: "https://ntfy.sh", topic: "" },
+    twin: { maxAcuLimit: 2, archiveOnEnd: true },
+    ...over,
+  };
+}
+
 test("config write/read round-trip", () => {
-  const cfg = {
+  const cfg = mkCfg({
     port: 9123,
     workspaces: ["/Users/x/a", "/Users/x/b c"],
     turnTtlMin: 45,
     tunnel: { provider: "quick" as const, hostname: "h.example.com" },
-  };
+  });
   S.writeConfig(cfg);
   const back = S.readConfig()!;
   expect(back.port).toBe(9123);
@@ -60,15 +72,11 @@ test("parseQuickTunnelUrl extracts trycloudflare URL from log", async () => {
 
 test("getTunnel selects provider", async () => {
   const { getTunnel } = await import("../src/cli/tunnel/index.ts");
-  const base = { port: 8787, workspaces: ["/tmp"], turnTtlMin: 30 };
-  expect(typeof getTunnel({ ...base, tunnel: { provider: "quick" } }).start).toBe("function");
-  expect(typeof getTunnel({ ...base, tunnel: { provider: "none" } }).start).toBe("function");
-  const none = getTunnel({
-    ...base,
-    tunnel: { provider: "none", publicUrl: "https://byo.example.com" },
-  });
+  expect(typeof getTunnel(mkCfg({ tunnel: { provider: "quick" } })).start).toBe("function");
+  expect(typeof getTunnel(mkCfg({ tunnel: { provider: "none" } })).start).toBe("function");
+  const none = getTunnel(mkCfg({ tunnel: { provider: "none", publicUrl: "https://byo.example.com" } }));
   expect((await none.start(8787)).url).toBe("https://byo.example.com");
-  const noneLocal = getTunnel({ ...base, tunnel: { provider: "none" } });
+  const noneLocal = getTunnel(mkCfg({ tunnel: { provider: "none" } }));
   expect((await noneLocal.start(8787)).url).toBe("http://127.0.0.1:8787");
 });
 
