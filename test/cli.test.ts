@@ -1,3 +1,4 @@
+import "./_env.ts";
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync, statSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";

@@ -1,3 +1,4 @@
+import "./_env.ts";
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -585,10 +586,15 @@ test("Stop hold hard cap ends turn and triggers completion once", async () => {
     { provider: "none", server: "", topic: "" },
     { maxAcuLimit: 2, archiveOnEnd: true, isRemoteOn: () => local.on, events, lookupTitle: async () => null });
   const h = new HookRuntime(events, queue, tm, handles, () => local, 400);
-  const out = await h.handle("Stop", { session_id: "sess-cap", stop_hook_active: false }, wsDir);
+  const p = h.handle("Stop", { session_id: "sess-cap", stop_hook_active: false }, wsDir);
+  // trigger fires at hold START (announce "waiting for instructions"), not at end
+  await Bun.sleep(100);
+  expect(h.isHolding("sess-cap")).toBe(true);
+  expect(posts).toEqual(["⟳"]);
+  const out = await p;
   expect(out).toEqual({});
   await Bun.sleep(50);
-  expect(posts).toEqual(["⟳"]);
+  expect(posts).toEqual(["⟳"]); // not again at cap
   // a second stop of the same turn (stop_hook_active) doesn't re-trigger
   await h.handle("Stop", { session_id: "sess-cap", stop_hook_active: true }, wsDir);
   await Bun.sleep(50);

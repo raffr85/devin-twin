@@ -48,7 +48,7 @@ Quando você receber uma mensagem "⟳": chame mac_get_events com o handle guard
 
 **Aguardando você:** <summary> — responda **aprovar** ou **negar**.   ← só se houver pendência
 
-O bloco de citação usa \`>\`. Emojis: ▶ rodando · ⏸ aguardando você · ✓ concluído · ✗ erro · 🔒 aberta no Desktop.
+O bloco de citação usa \`>\`. Emojis: ▶ rodando · ⏸ aguardando você (também significa "turno concluído, esperando suas instruções" — modo ausente segurando o turno; use \`live.holding\` do mac_get_events para saber) · ✓ concluído · ✗ erro · 🔒 aberta no Desktop. Se um evento "⟳" chegar durante uma espera, o estado é "⏸ Aguardando suas instruções".
 
 Ao enviar instruções com mac_send_message, relate o campo \`delivery\`: "acp_now" → "Enviado; a sessão está rodando." · "hook_live" → "Enviado; o agente recebe em instantes." · "queued_idle_locked" → "A sessão está parada no Desktop; sua instrução fica na fila. Quer que eu continue numa nova sessão com o contexto dela? Responda **continuar**." — se o usuário responder "continuar", chame mac_continue_session com o handle e a última instrução, e passe a monitorar o novo handle retornado.
 

@@ -199,10 +199,10 @@ export class HookRuntime {
         });
         // "turno concluído" fires once, only when the turn is actually let
         // to end — never on queued-instruction delivery nor on re-arms.
-        const endTurn = () => {
+        const endTurn = (headline = "turno concluído") => {
           if (this.turnFired.has(sid)) return;
           this.turnFired.add(sid);
-          void this.twin.trigger(sid, "turno concluído", "stop", meta);
+          void this.twin.trigger(sid, headline, "stop", meta);
         };
         const queued = this.drainQueue(sid, "stop", meta.handle);
         if (queued.length) {
@@ -219,6 +219,8 @@ export class HookRuntime {
         // absent mode: hold the turn open until an instruction arrives,
         // remote turns off, or the hard cap is reached; re-arm under the
         // curl timeout by blocking with a no-op just before ~840s.
+        // announce the hold start once per real turn
+        if (!stopActive) endTurn("turno concluído · aguardando suas instruções");
         this.holds.add(sid);
         if (!this.holdDeadline.has(sid))
           this.holdDeadline.set(sid, Date.now() + r.maxHoldMinutes * 60_000);

@@ -366,7 +366,7 @@ export function createMcpServer(ctx: Ctx): McpServer {
     return toJson({
       handle: session,
       title: title ?? live.title,
-      live,
+      live: { ...live, holding: ctx.hooks.isHolding(sessionId) },
       events,
       nextSince,
       pendingActions: listPending(sessionId),

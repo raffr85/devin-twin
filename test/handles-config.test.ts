@@ -1,3 +1,4 @@
+import "./_env.ts";
 import { test, expect } from "bun:test";
 import { HandleMap } from "../src/handles.ts";
 import { loadConfig } from "../src/config.ts";

@@ -1,3 +1,4 @@
+import "./_env.ts";
 import { test, expect } from "bun:test";
 import { foldUpdates, summarize, deriveState } from "../src/history.ts";
 
