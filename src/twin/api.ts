@@ -65,6 +65,24 @@ export class DevinApi {
     return r.json();
   }
 
+  async createPlaybook(title: string, body: string): Promise<{ playbook_id: string }> {
+    const r = await this.req("POST", "/playbooks", { title, body });
+    if (!r.ok) throw new Error(`create playbook: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
+    return r.json() as Promise<{ playbook_id: string }>;
+  }
+
+  async getPlaybook(id: string): Promise<{ playbook_id: string; body: string } | null> {
+    const r = await this.req("GET", `/playbooks/${id}`);
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error(`get playbook: HTTP ${r.status}`);
+    return r.json() as Promise<{ playbook_id: string; body: string }>;
+  }
+
+  async updatePlaybook(id: string, title: string, body: string): Promise<void> {
+    const r = await this.req("PUT", `/playbooks/${id}`, { title, body });
+    if (!r.ok) throw new Error(`update playbook: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
+  }
+
   async archive(devinId: string): Promise<void> {
     const id = devinId.startsWith("devin-") ? devinId : `devin-${devinId}`;
     const r = await this.req("POST", `/sessions/${id}/archive`);

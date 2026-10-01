@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, basename } from "node:path";
 import { execSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { hostname as osHostname } from "node:os";
 import type { DevinApi } from "./api.ts";
 import type { PushConfig } from "../push.ts";
@@ -24,18 +25,28 @@ export type TwinRec = {
   archived: boolean;
 };
 
-const NARRATOR = `Você é um monitor ao vivo de uma sessão do Devin rodando localmente no Mac {HOST}. Você NUNCA executa trabalho — só observa, resume e repassa respostas do usuário. Use SOMENTE as tools mac_* do servidor MCP configurado.
+const PLAYBOOK_TITLE = "Devin Twin · narrator";
 
-A sessão local monitorada é o handle {HANDLE} ("{TITLE}").
+// Org-level playbook body — no session-specific placeholders; the twin learns
+// its local session handle from the first "⟳ <handle> · <título>" message.
+export const NARRATOR_BODY = `Você é um monitor ao vivo de uma sessão do Devin rodando localmente num Mac do usuário. Você NUNCA executa trabalho — só observa, resume e repassa respostas do usuário. Use SOMENTE as tools mac_* do servidor MCP configurado.
 
-Quando você receber uma mensagem começando com "⟳": chame mac_get_events com esse handle (passe since = o último nextSince que você recebeu; se não tiver, omita) e escreva UMA atualização neste formato exato:
+A primeira mensagem do usuário tem o formato \`⟳ <handle> · <título>\`: esse é o handle da sessão local a monitorar; guarde-o.
 
-**<emoji> <Estado>** · {TITLE curto} · <localTime retornado pela tool>
-2–4 frases sobre o que o agente local fez (comandos/arquivos em \`backticks\`).
-*Última mensagem dele:* "<lastAssistantMessage, máx 2 frases>"
-Se houver pendência: **Aguardando você:** <summary>. Responda **aprovar** ou **negar**.
+Quando você receber uma mensagem "⟳": chame mac_get_events com o handle guardado (passe since = o último nextSince que você recebeu; se não tiver, omita) e escreva UMA atualização neste formato exato — cada bloco DEVE ser separado por uma linha em branco:
 
-Emojis: ▶ rodando · ⏸ aguardando você · ✓ concluído · ✗ erro · 🔒 aberta no Desktop.
+**<emoji> <Estado>** · <título curto> · <localTime retornado pela tool>
+
+- <ação 1: comando ou arquivo em \`backticks\`>
+- <ação 2>
+- <ação 3 (máx 4 itens)>
+
+*Última mensagem dele:*
+> <lastAssistantMessage, até 2 frases>
+
+**Aguardando você:** <summary> — responda **aprovar** ou **negar**.   ← só se houver pendência
+
+O bloco de citação usa \`>\`. Emojis: ▶ rodando · ⏸ aguardando você · ✓ concluído · ✗ erro · 🔒 aberta no Desktop.
 
 Mensagens do usuário que NÃO começam com "⟳" são comandos: "aprovar"/"negar" → chame mac_get_pending_actions e mac_respond_permission com a pendência dessa sessão; qualquer outro texto → mac_send_message com o handle e o texto (relate o campo delivery); perguntas → responda brevemente com base em mac_get_events/mac_get_session. Nunca aprove por conta própria; nunca peça confirmação para ler; nunca saia do formato acima.
 
@@ -45,6 +56,8 @@ const COALESCE_MS = 20_000;
 
 export class TwinManager {
   private twins: Record<string, TwinRec> = {};
+  private playbook: { id: string; sha: string } | null = null;
+  private playbookPromise: Promise<string | null> | null = null;
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private pendingHeadline = new Map<string, string>();
 
@@ -61,13 +74,21 @@ export class TwinManager {
     },
   ) {
     try {
-      if (existsSync(file)) this.twins = JSON.parse(readFileSync(file, "utf8"));
+      if (existsSync(file)) {
+        const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+        const { _playbook, ...rest } = raw;
+        this.twins = rest as Record<string, TwinRec>;
+        this.playbook = (_playbook as { id: string; sha: string }) ?? null;
+      }
     } catch {}
   }
 
   private persist(): void {
     mkdirSync(dirname(this.file), { recursive: true });
-    writeFileSync(this.file, JSON.stringify(this.twins, null, 2));
+    writeFileSync(
+      this.file,
+      JSON.stringify({ ...this.twins, _playbook: this.playbook }, null, 2),
+    );
   }
 
   list(): Record<string, TwinRec> {
@@ -120,6 +141,39 @@ export class TwinManager {
     return n;
   }
 
+  // Ensure the org playbook exists and matches the current NARRATOR_BODY.
+  private ensurePlaybook(): Promise<string | null> {
+    if (!this.playbookPromise) {
+      this.playbookPromise = (async () => {
+        if (!this.api) return null;
+        const sha = createHash("sha256").update(NARRATOR_BODY).digest("hex").slice(0, 16);
+        try {
+          if (this.playbook) {
+            const existing = await this.api.getPlaybook(this.playbook.id);
+            if (existing) {
+              if (this.playbook.sha !== sha) {
+                await this.api.updatePlaybook(this.playbook.id, PLAYBOOK_TITLE, NARRATOR_BODY);
+                this.playbook.sha = sha;
+                this.persist();
+                audit({ event: "playbook_updated", playbookId: this.playbook.id });
+              }
+              return this.playbook.id;
+            }
+          }
+          const created = await this.api.createPlaybook(PLAYBOOK_TITLE, NARRATOR_BODY);
+          this.playbook = { id: created.playbook_id, sha };
+          this.persist();
+          audit({ event: "playbook_created", playbookId: this.playbook.id });
+          return this.playbook.id;
+        } catch (e) {
+          audit({ event: "playbook_failed", error: String(e) });
+          return null;
+        }
+      })();
+    }
+    return this.playbookPromise;
+  }
+
   async ensureTwin(
     sessionId: string,
     meta: { title?: string | null; cwd?: string | null; handle: string },
@@ -132,16 +186,15 @@ export class TwinManager {
       meta.title || (await this.resolveTitle(sessionId)) ||
       (meta.cwd ? basename(meta.cwd) : sessionId);
     try {
-      const prompt = NARRATOR.replace("{HANDLE}", meta.handle)
-        .replace("{TITLE}", title)
-        .replace("{HOST}", host);
+      const playbookId = await this.ensurePlaybook();
       const created = await this.api.createSession({
         title: `[${host}] ${title}`,
         tags: [`mac:${host}`],
         devin_mode: "lite",
         max_acu_limit: this.opts.maxAcuLimit,
         structured_output_required: false,
-        prompt,
+        ...(playbookId ? { playbook_id: playbookId } : {}),
+        prompt: `⟳ ${meta.handle} · ${title}`,
       });
       const rec: TwinRec = {
         devinId: created.session_id,
@@ -185,10 +238,9 @@ export class TwinManager {
 
     const now = Date.now();
     const send = async () => {
-      const text = this.pendingHeadline.get(sessionId) ?? headline;
       this.pendingHeadline.delete(sessionId);
       try {
-        await this.api!.postMessage(twin.devinId, `⟳ ${text}`);
+        await this.api!.postMessage(twin.devinId, "⟳");
         twin.lastTriggerAt = Date.now();
         this.persist();
       } catch (e) {

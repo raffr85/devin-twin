@@ -273,6 +273,12 @@ test("twin manager: creates once, coalesces, immediate permission, archives", as
   const calls: Array<{ method: string; url: string; body: unknown }> = [];
   const fakeFetch: Fetcher = async (url, init) => {
     calls.push({ method: init.method ?? "GET", url, body: init.body ? JSON.parse(String(init.body)) : null });
+    if (url.endsWith("/playbooks") && init.method === "POST") {
+      return new Response(JSON.stringify({ playbook_id: "pb-1", body: (JSON.parse(String(init.body))).body }));
+    }
+    if (/\/playbooks\//.test(url) && init.method === "GET") {
+      return new Response(JSON.stringify({ playbook_id: "pb-1", body: "stale" }));
+    }
     if (url.endsWith("/sessions") && init.method === "POST") {
       return new Response(JSON.stringify({ session_id: "devin-abc", url: "https://app.devin.ai/x" }));
     }
@@ -292,12 +298,17 @@ test("twin manager: creates once, coalesces, immediate permission, archives", as
   await tm.trigger("s1", "turno iniciado: a", "user_prompt", meta);
   const t1 = tm.list()["s1"];
   expect(t1!.devinId).toBe("devin-abc");
-  expect(calls.filter((c) => c.method === "POST" && c.url.endsWith("/sessions"))).toHaveLength(1);
+  const sessionCreates = calls.filter((c) => c.method === "POST" && c.url.endsWith("/sessions"));
+  expect(sessionCreates).toHaveLength(1);
+  // playbook created once, twin uses it, prompt is the short glyph line
+  expect(calls.filter((c) => c.method === "POST" && c.url.endsWith("/playbooks"))).toHaveLength(1);
+  expect(sessionCreates[0]!.body).toMatchObject({ playbook_id: "pb-1", prompt: "⟳ s_1 · T" });
   // creates once
   await tm.trigger("s1", "turno iniciado: b", "user_prompt", meta);
   expect(calls.filter((c) => c.url.endsWith("/sessions") && c.method === "POST")).toHaveLength(1);
+  expect(calls.filter((c) => c.method === "POST" && c.url.endsWith("/playbooks"))).toHaveLength(1);
   const msgCalls = () => calls.filter((c) => c.url.includes("/messages"));
-  expect(msgCalls()[0]!.body).toMatchObject({ message: "⟳ turno iniciado: a" });
+  expect(msgCalls()[0]!.body).toMatchObject({ message: "⟳" });
   // second trigger coalesced (20s window) — schedule; permission_request immediate
   const before = msgCalls().length;
   await tm.trigger("s1", "pede permissão: rm", "permission_request", meta);
@@ -370,6 +381,8 @@ test("title resolution: prompt fallback when ACP has no title", async () => {
   const calls: Array<{ method: string; url: string; body: unknown }> = [];
   const fakeFetch: Fetcher = async (url, init) => {
     calls.push({ method: init.method ?? "GET", url, body: init.body ? JSON.parse(String(init.body)) : null });
+    if (url.endsWith("/playbooks") && init.method === "POST")
+      return new Response(JSON.stringify({ playbook_id: "pb-t" }));
     if (url.endsWith("/sessions") && init.method === "POST") {
       return new Response(JSON.stringify({ session_id: "devin-t2", url: "https://app.devin.ai/y" }));
     }
@@ -407,6 +420,8 @@ test("Stop with queued instruction does not post 'turno concluído' trigger", as
   const fakeFetch: Fetcher = async (url, init) => {
     if (init.method === "POST" && String(url).includes("/messages"))
       posts.push(String(JSON.parse(String(init.body)).message));
+    if (String(url).endsWith("/playbooks") && init.method === "POST")
+      return new Response(JSON.stringify({ playbook_id: "pb-s" }));
     if (String(url).endsWith("/sessions") && init.method === "POST")
       return new Response(JSON.stringify({ session_id: "devin-t3", url: "u" }));
     return new Response("{}");
@@ -424,10 +439,32 @@ test("Stop with queued instruction does not post 'turno concluído' trigger", as
   const out = await hooks.handle("Stop", { session_id: "sid-s", stop_hook_active: false }, wsDir);
   expect((out as { decision: string }).decision).toBe("block");
   await Bun.sleep(50);
-  expect(posts.filter((m) => m.includes("turno concluído"))).toHaveLength(0);
+  expect(posts).toHaveLength(0); // turn continues — no trigger to the twin
   // next real Stop (empty queue) does trigger
   const out2 = await hooks.handle("Stop", { session_id: "sid-s", stop_hook_active: false }, wsDir);
   expect(out2).toEqual({});
   await Bun.sleep(50);
-  expect(posts.some((m) => m.includes("turno concluído"))).toBe(true);
+  expect(posts).toEqual(["⟳"]);
+});
+
+test("playbook updated when stored sha is stale", async () => {
+  const calls: Array<{ method: string; url: string }> = [];
+  const fakeFetch: Fetcher = async (url, init) => {
+    calls.push({ method: init.method ?? "GET", url });
+    if (/playbooks\//.test(url) && init.method === "GET")
+      return new Response(JSON.stringify({ playbook_id: "pb-old", body: "old" }));
+    if (String(url).endsWith("/sessions") && init.method === "POST")
+      return new Response(JSON.stringify({ session_id: "devin-x", url: "u" }));
+    return new Response("{}");
+  };
+  const { DevinApi } = await import("../src/twin/api.ts");
+  const file = join(dir, "twins-pb.json");
+  writeFileSync(file, JSON.stringify({ _playbook: { id: "pb-old", sha: "stale" } }));
+  const tm = new TwinManager(file, new DevinApi("k", "o", fakeFetch),
+    { provider: "none", server: "", topic: "" },
+    { maxAcuLimit: 2, archiveOnEnd: true, isRemoteOn: () => true,
+      events: new EventStore(join(dir, "ev-pb")), lookupTitle: async () => null });
+  await tm.trigger("s9", "h", "user_prompt", { title: "T", cwd: "/tmp", handle: "s_9" });
+  expect(calls.some((c) => c.method === "PUT" && c.url.endsWith("/playbooks/pb-old"))).toBe(true);
+  expect(calls.some((c) => c.method === "POST" && c.url.endsWith("/playbooks"))).toBe(false);
 });
