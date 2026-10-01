@@ -19,7 +19,7 @@ The Devin v3 API can create tiny `lite`-mode Cloud sessions and attach MCP serve
 | | |
 |---|---|
 | Twin card per session | A Cloud session titled `[<hostname>] <session title>` (tagged `mac:<host>`) appears in the app for every local session |
-| Live narration | Milestones (turn started, tool calls, turn done, errors) are narrated in Portuguese by a lite-mode narrator with a fixed layout |
+| Live narration | Milestones (turn started, tool calls, turn done, errors) are narrated by a lite-mode narrator with a fixed layout (the narrator, pushes and reply keywords are currently in Portuguese; see `src/twin/manager.ts`) |
 | Push notifications | Optional ntfy pushes for every milestone; high priority on permission requests; tap opens the twin |
 | Approve/deny | Permission requests show up on the twin; your reply is relayed to the local agent through the hook |
 | Send instructions | Type an instruction in the twin chat; it's delivered into the live turn or queued |
@@ -62,10 +62,10 @@ The Devin v3 API can create tiny `lite`-mode Cloud sessions and attach MCP serve
 
 1. You prompt a local session (CLI or Desktop).
 2. The agent finishes its turn → the `Stop` hook fires into the bridge. With absent mode on, the bridge holds the turn open (the session still shows "working").
-3. The bridge fires a `⟳` trigger into the twin and sends you an ntfy push: "turno concluído · aguardando suas instruções".
+3. The bridge fires a `⟳` trigger into the twin and sends you an ntfy push: "turn finished · waiting for your instructions".
 4. You open the twin in the app, read the narration, and reply with an instruction.
 5. The twin calls `mac_send_message`; the bridge's held Stop hook returns it as `{"decision":"block","reason":…}`, so the local agent picks it up and keeps working.
-6. The agent needs a permission → `PermissionRequest` hook holds → push + twin render → you answer "aprovar" → `mac_respond_permission` → the hook returns `{"decision":"approve"}` → the command runs.
+6. The agent needs a permission → `PermissionRequest` hook holds → push + twin render → you answer "approve" → `mac_respond_permission` → the hook returns `{"decision":"approve"}` → the command runs.
 
 ## Quick start
 
@@ -139,7 +139,7 @@ The topic is a secret — anyone who knows it can read your pushes (and they con
 - **Permission relay**: `PermissionRequest` holds up to ~9 minutes; if you don't answer, it falls through and the normal Desktop prompt appears. The bridge never auto-approves.
 - **Honest delivery**: `mac_send_message` reports `acp_now` (bridge-owned session, sent immediately), `hook_live` (active turn or Stop hold — injected in seconds), or `queued_idle_locked` (idle + Desktop-locked — queued, with a suggestion to use `mac_continue_session`).
 - **SessionEnd drain**: if a session ends with queued instructions, the bridge waits ~2s for the session lock to release, then sends them over ACP (`queue_drained_on_end` in the audit log).
-- **Continuation**: `mac_continue_session` spawns a new bridge-owned session in the same cwd, seeded with a compact summary of the original's history plus your instruction. It narrates into the same twin; pushes get "(continuação)".
+- **Continuation**: `mac_continue_session` spawns a new bridge-owned session in the same cwd, seeded with a compact summary of the original's history plus your instruction. It narrates into the same twin; pushes get "(continuation)".
 
 Leave absent mode off when you're at the desk — held turns keep Desktop showing "working" and route permission prompts through your phone.
 
