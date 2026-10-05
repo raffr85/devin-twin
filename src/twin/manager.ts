@@ -52,6 +52,8 @@ O bloco de citação usa \`>\`. Emojis: ▶ rodando · ⏸ aguardando você (tam
 
 Ao enviar instruções com mac_send_message, relate o campo \`delivery\`: "acp_now" → "Enviado; a sessão está rodando." · "hook_live" → "Enviado; o agente recebe em instantes." · "queued_idle_locked" → "A sessão está parada no Desktop; sua instrução fica na fila. Quer que eu continue numa nova sessão com o contexto dela? Responda **continuar**." — se o usuário responder "continuar", chame mac_continue_session com o handle e a última instrução, e passe a monitorar o novo handle retornado.
 
+Anexos numa mensagem "⟳" são artefatos produzidos pelo agente local (ex.: screenshot do simulador, log) — mencione-os no estado como "**Arquivo:** nome" após a lista de ações; nunca descreva conteúdo que você não viu.
+
 Mensagens do usuário que NÃO começam com "⟳" são comandos: "aprovar"/"negar" → chame mac_get_pending_actions e mac_respond_permission com a pendência dessa sessão; qualquer outro texto → mac_send_message com o handle e o texto (relate o campo delivery); perguntas → responda brevemente com base em mac_get_events/mac_get_session. Nunca aprove por conta própria; nunca peça confirmação para ler; nunca saia do formato acima.
 
 Primeira ação: faça a primeira atualização agora.`;
@@ -64,6 +66,7 @@ export class TwinManager {
   private playbookPromise: Promise<string | null> | null = null;
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private pendingHeadline = new Map<string, string>();
+  private pendingAttachments = new Map<string, string[]>();
 
   constructor(
     private file: string,
@@ -187,6 +190,26 @@ export class TwinManager {
     return sessionId;
   }
 
+  private uploadsDisabled = false;
+
+  /** Upload bytes as a Devin attachment; returns its url or null. */
+  async uploadArtifact(name: string, bytes: Uint8Array, mime: string): Promise<string | null> {
+    if (!this.api || this.uploadsDisabled) return null;
+    try {
+      const { url } = await this.api.uploadAttachment(name, bytes, mime);
+      audit({ event: "attach_uploaded", name, mime, bytes: bytes.length });
+      return url;
+    } catch (e) {
+      if ((e as { forbidden?: boolean }).forbidden) {
+        this.uploadsDisabled = true;
+        audit({ event: "attach_upload_denied" });
+      } else {
+        audit({ event: "attach_upload_failed", name, error: String(e) });
+      }
+      return null;
+    }
+  }
+
   /** Continuation sessions feed the same twin. */
   addAlias(origSessionId: string, newSessionId: string): void {
     const rec = this.twins[this.canonical(origSessionId)];
@@ -242,9 +265,16 @@ export class TwinManager {
     headline: string,
     kind: string,
     meta: { title?: string | null; cwd?: string | null; handle: string },
+    attachments?: string[],
+    attachImage?: string,
   ): Promise<void> {
     if (!this.opts.isRemoteOn()) return;
     const canon = this.canonical(sessionId);
+    if (attachments?.length)
+      this.pendingAttachments.set(canon, [
+        ...(this.pendingAttachments.get(canon) ?? []),
+        ...attachments,
+      ]);
     const isContinuation = canon !== sessionId;
     const refresh = kind === "stop" || kind === "session_end";
     const title = (await this.resolveTitle(sessionId, refresh)) ?? meta.title;
@@ -258,13 +288,16 @@ export class TwinManager {
       body: headline,
       click: twin.url,
       kind,
+      attach: attachImage,
     });
 
     const now = Date.now();
     const send = async () => {
       this.pendingHeadline.delete(canon);
+      const urls = this.pendingAttachments.get(canon) ?? [];
+      this.pendingAttachments.delete(canon);
       try {
-        await this.api!.postMessage(twin.devinId, "⟳");
+        await this.api!.postMessage(twin.devinId, "⟳", urls);
         twin.lastTriggerAt = Date.now();
         this.persist();
       } catch (e) {

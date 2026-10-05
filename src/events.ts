@@ -11,6 +11,7 @@ export type EvKind =
   | "stop"
   | "instruction_queued"
   | "instruction_delivered"
+  | "artifact"
   | "instruction_expired"
   | "session_end";
 

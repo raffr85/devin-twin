@@ -52,9 +52,12 @@ export class DevinApi {
     return r.json() as Promise<{ session_id: string; url: string }>;
   }
 
-  async postMessage(devinId: string, message: string): Promise<void> {
+  async postMessage(devinId: string, message: string, attachmentUrls?: string[]): Promise<void> {
     const id = devinId.startsWith("devin-") ? devinId : `devin-${devinId}`;
-    const r = await this.req("POST", `/sessions/${id}/messages`, { message });
+    const r = await this.req("POST", `/sessions/${id}/messages`, {
+      message,
+      ...(attachmentUrls?.length ? { attachment_urls: attachmentUrls } : {}),
+    });
     if (!r.ok) throw new Error(`post message: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
   }
 
@@ -63,6 +66,32 @@ export class DevinApi {
     const r = await this.req("GET", `/sessions/${id}`);
     if (!r.ok) throw new Error(`get session: HTTP ${r.status}`);
     return r.json();
+  }
+
+  /** Multipart upload. Response shape may be {url} or {attachment:{url}}. */
+  async uploadAttachment(
+    name: string,
+    bytes: Uint8Array,
+    mime: string,
+  ): Promise<{ url: string }> {
+    const fd = new FormData();
+    fd.append("file", new Blob([bytes], { type: mime }), name);
+    const r = await this.fetcher(`${BASE}/v3/organizations/${this.org}/attachments`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${this.key}` },
+      body: fd,
+    });
+    if (r.status === 403) {
+      const e = new Error("upload attachment: HTTP 403") as Error & { forbidden?: boolean };
+      e.forbidden = true;
+      throw e;
+    }
+    if (!r.ok)
+      throw new Error(`upload attachment: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
+    const j = (await r.json()) as { url?: string; attachment?: { url?: string } };
+    const url = j.url ?? j.attachment?.url;
+    if (!url) throw new Error("upload attachment: no url in response");
+    return { url };
   }
 
   async createPlaybook(title: string, body: string): Promise<{ playbook_id: string }> {

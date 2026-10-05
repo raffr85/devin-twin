@@ -8,6 +8,7 @@ import type { HandleMap } from "./handles.ts";
 import { addPendingHookPermission, drop } from "./pending.ts";
 import { audit } from "./audit.ts";
 import { pidAlive } from "./cli/state.ts";
+import { ArtifactWatcher } from "./attach.ts";
 
 export type RemoteReader = () => { on: boolean; maxHoldMinutes: number };
 
@@ -41,6 +42,7 @@ export class HookRuntime {
   private reArms = new Map<string, number>();
   private holdDeadline = new Map<string, number>();
   private turnFired = new Set<string>();
+  private attach = new ArtifactWatcher();
   drainOnEnd:
     | ((sid: string, cwd: string, text: string) => Promise<void>)
     | null = null;
@@ -74,6 +76,41 @@ export class HookRuntime {
     if (items.length) audit({ event: "instruction_delivered", session: handle, via });
     if (expired.length) audit({ event: "instruction_expired", session: handle });
     return items;
+  }
+
+  /** Upload new artifacts from the session's attach dir and trigger the twin. */
+  private async pushArtifacts(
+    sid: string,
+    meta: { title?: string | null; cwd?: string | null; handle: string },
+  ): Promise<void> {
+    try {
+      const arts = await this.attach.collect(sid);
+      if (!arts.length) return;
+      const urls: string[] = [];
+      const done: typeof arts = [];
+      let firstImage: string | undefined;
+      for (const a of arts) {
+        const url = await this.twin.uploadArtifact(a.name, a.bytes, a.mime);
+        if (!url) continue; // failed → retried on next scan
+        urls.push(url);
+        done.push(a);
+        if (!firstImage && a.mime.startsWith("image/")) firstImage = url;
+        this.events.append(sid, "artifact", {
+          name: a.name,
+          mime: a.mime,
+          bytes: a.bytes.length,
+          url,
+        });
+      }
+      this.attach.markUploaded(sid, done);
+      if (urls.length) {
+        const first = done[0]!;
+        const headline = `${first.mime.startsWith("image/") ? "new image" : "new file"}: ${first.name}`;
+        await this.twin.trigger(sid, headline, "artifact", meta, urls, firstImage);
+      }
+    } catch (e) {
+      audit({ event: "attach_scan_failed", error: String(e) });
+    }
   }
 
   private blockWith(items: string[]): Record<string, unknown> {
@@ -131,7 +168,17 @@ export class HookRuntime {
     switch (event) {
       case "SessionStart": {
         this.events.append(sid, "session_start", { source: body.source, cwd });
-        return {};
+        if (!this.remote().on) return {};
+        const dir = this.attach.dirFor(sid);
+        return {
+          hookSpecificOutput: {
+            hookEventName: "SessionStart",
+            additionalContext:
+              `To show the user an image or a short log on their phone, save it into ${dir} ` +
+              `(png/jpg/gif/webp/txt/log/md, ≤5 MB). Files there are uploaded to the user's Devin ` +
+              `twin session automatically. Example: xcrun simctl io booted screenshot ${dir}/login.png`,
+          },
+        };
       }
       case "UserPromptSubmit": {
         this.turnFired.delete(sid); // a new user turn begins
@@ -156,6 +203,7 @@ export class HookRuntime {
           summary: summary(String(body.tool_name ?? ""), body.tool_input),
           success: resp.success ?? null,
         });
+        void this.pushArtifacts(sid, meta);
         return {};
       }
       case "PermissionRequest": {
@@ -220,12 +268,14 @@ export class HookRuntime {
         // remote turns off, or the hard cap is reached; re-arm under the
         // curl timeout by blocking with a no-op just before ~840s.
         // announce the hold start once per real turn
+        void this.pushArtifacts(sid, meta);
         if (!stopActive) endTurn("turno concluído · aguardando suas instruções");
         this.holds.add(sid);
         if (!this.holdDeadline.has(sid))
           this.holdDeadline.set(sid, Date.now() + r.maxHoldMinutes * 60_000);
         const deadline = this.holdDeadline.get(sid)!;
         const rearmAt = Date.now() + this.rearmMs;
+        let lastScan = 0;
         const done = () => {
           this.reArms.delete(sid);
           this.holdDeadline.delete(sid);
@@ -260,6 +310,11 @@ export class HookRuntime {
               }
               this.reArms.set(sid, n);
               return { decision: "block", reason: REARM_REASON };
+            }
+            const now2 = Date.now();
+            if (now2 - lastScan >= 5_000) {
+              lastScan = now2;
+              await this.pushArtifacts(sid, meta);
             }
             await Bun.sleep(500);
           }

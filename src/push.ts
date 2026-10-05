@@ -10,7 +10,7 @@ const TAGS: Record<string, string> = {
 
 export async function push(
   cfg: PushConfig,
-  opts: { host: string; title: string; body: string; click?: string; kind?: string },
+  opts: { host: string; title: string; body: string; click?: string; kind?: string; attach?: string },
 ): Promise<void> {
   if (cfg.provider !== "ntfy" || !cfg.topic) return;
   try {
@@ -22,6 +22,7 @@ export async function push(
         Click: opts.click ?? "",
         Priority: opts.kind === "permission_request" ? "high" : "default",
         Tags: TAGS[opts.kind ?? ""] ?? "hourglass",
+        ...(opts.attach ? { Attach: opts.attach } : {}),
       },
       body: opts.body,
     });

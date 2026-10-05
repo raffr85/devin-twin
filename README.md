@@ -25,6 +25,7 @@ The Devin v3 API can create tiny `lite`-mode Cloud sessions and attach MCP serve
 | Send instructions | Type an instruction in the twin chat; it's delivered into the live turn or queued |
 | Absent mode | `twin remote on` holds every Stop hook open so queued instructions land within seconds |
 | Continuation | Idle Desktop-locked sessions can be continued in a new bridge-owned session with their history summarized |
+| Artifacts | Screenshots and logs the agent saves into `<state>/attach/<sessionId>/` (png/jpg/gif/webp/txt/log/md, ≤5 MB) are uploaded as attachments on the twin — e.g. an iOS Simulator screenshot lands on your phone; image pushes carry an ntfy `Attach` preview |
 
 ## Architecture
 
@@ -140,6 +141,7 @@ The topic is a secret — anyone who knows it can read your pushes (and they con
 - **Honest delivery**: `mac_send_message` reports `acp_now` (bridge-owned session, sent immediately), `hook_live` (active turn or Stop hold — injected in seconds), or `queued_idle_locked` (idle + Desktop-locked — queued, with a suggestion to use `mac_continue_session`).
 - **SessionEnd drain**: if a session ends with queued instructions, the bridge waits ~2s for the session lock to release, then sends them over ACP (`queue_drained_on_end` in the audit log).
 - **Continuation**: `mac_continue_session` spawns a new bridge-owned session in the same cwd, seeded with a compact summary of the original's history plus your instruction. It narrates into the same twin; pushes get "(continuation)".
+- **Artifacts**: with remote mode on, the SessionStart hook tells the agent about `~/.local/share/devin-twin/attach/<sessionId>/`. Files saved there (png/jpg/gif/webp/txt/log/md, ≤5 MB, ≤4 per scan) are uploaded as attachments on the next twin trigger; the watch runs on PostToolUse, on Stop, and every ~5s while a Stop hold is parked. Text artifacts are secret-redacted before upload; symlinks and path escapes are rejected.
 
 Leave absent mode off when you're at the desk — held turns keep Desktop showing "working" and route permission prompts through your phone.
 
