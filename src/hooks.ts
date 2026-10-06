@@ -83,6 +83,7 @@ export class HookRuntime {
     sid: string,
     meta: { title?: string | null; cwd?: string | null; handle: string },
   ): Promise<void> {
+    if (!this.remote().on) return; // nothing leaves the Mac unless absent mode is on
     try {
       const arts = await this.attach.collect(sid);
       if (!arts.length) return;

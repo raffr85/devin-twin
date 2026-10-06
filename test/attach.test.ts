@@ -1,6 +1,6 @@
 import "./_env.ts";
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, symlinkSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, symlinkSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ArtifactWatcher } from "../src/attach.ts";
@@ -23,7 +23,7 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);
 
 test("collect picks new allowed files, once", async () => {
-  const w = new ArtifactWatcher(join(dir, "att1"));
+  const w = new ArtifactWatcher(join(dir, "att1"), 0);
   const d = w.dirFor("s1");
   writeFileSync(join(d, "shot.png"), PNG);
   writeFileSync(join(d, "notes.txt"), "hello");
@@ -40,7 +40,7 @@ test("collect picks new allowed files, once", async () => {
 });
 
 test("collect rejects symlink, oversize, wrong extension", async () => {
-  const w = new ArtifactWatcher(join(dir, "att2"));
+  const w = new ArtifactWatcher(join(dir, "att2"), 0);
   const d = w.dirFor("s2");
   writeFileSync(join(dir, "outside.png"), PNG);
   symlinkSync(join(dir, "outside.png"), join(d, "link.png"));
@@ -52,7 +52,7 @@ test("collect rejects symlink, oversize, wrong extension", async () => {
 });
 
 test("collect caps at 4 per scan, rest next time", async () => {
-  const w = new ArtifactWatcher(join(dir, "att3"));
+  const w = new ArtifactWatcher(join(dir, "att3"), 0);
   const d = w.dirFor("s3");
   for (let i = 0; i < 6; i++) writeFileSync(join(d, `f${i}.txt`), `n${i}`);
   const a1 = await w.collect("s3");
@@ -63,7 +63,7 @@ test("collect caps at 4 per scan, rest next time", async () => {
 });
 
 test("text artifacts are redacted", async () => {
-  const w = new ArtifactWatcher(join(dir, "att4"));
+  const w = new ArtifactWatcher(join(dir, "att4"), 0);
   const d = w.dirFor("s4");
   writeFileSync(join(d, "keys.log"), "api_key=sk-abc123def456ghi789 ok");
   const arts = await w.collect("s4");
@@ -104,7 +104,10 @@ test("upload → twin message carries attachment_urls; artifact event; ntfy Atta
     const wsDir = join(dir, "ws");
     // write an artifact into the session's attach dir
     const adir = hooks["attach"].dirFor("sess-art");
-    writeFileSync(join(adir, "ui.png"), PNG);
+    const pngPath = join(adir, "ui.png");
+    writeFileSync(pngPath, PNG);
+    const old = new Date(Date.now() - 3000); // past the 1500ms settle window
+    utimesSync(pngPath, old, old);
     await hooks.handle("PostToolUse", { session_id: "sess-art", tool_name: "write", tool_input: {} }, wsDir);
     await Bun.sleep(300);
     const post = calls.find((c) => c.url.endsWith("/attachments"));
@@ -117,6 +120,52 @@ test("upload → twin message carries attachment_urls; artifact event; ntfy Atta
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test("settle window: fresh files skipped, settled files collected", async () => {
+  const w = new ArtifactWatcher(join(dir, "att5"), 1500);
+  const d = w.dirFor("s5");
+  writeFileSync(join(d, "fresh.png"), PNG); // mtime = now → still writing
+  const stale = join(d, "settled.png");
+  writeFileSync(stale, PNG);
+  const old = new Date(Date.now() - 3000);
+  utimesSync(stale, old, old);
+  const arts = await w.collect("s5");
+  expect(arts.map((a) => a.name)).toEqual(["settled.png"]);
+});
+
+test("remote off: no scan upload; remote on: uploaded on next scan", async () => {
+  const calls: string[] = [];
+  const fakeFetch: Fetcher = async (url, init) => {
+    calls.push(String(url));
+    if (String(url).endsWith("/attachments"))
+      return new Response(JSON.stringify({ url: "https://cdn.example.com/x.png" }));
+    if (String(url).endsWith("/playbooks"))
+      return new Response(JSON.stringify({ playbook_id: "pb-1" }));
+    if (String(url).endsWith("/sessions"))
+      return new Response(JSON.stringify({ session_id: "devin-y", url: "u" }));
+    return new Response("{}");
+  };
+  const remote = { on: false, maxHoldMinutes: 720 };
+  const ev = new EventStore(join(dir, "ev-g"));
+  const q = new InstructionQueue(join(dir, "q-g.json"));
+  const tm = new TwinManager(join(dir, "twins-g.json"), new DevinApi("k", "o", fakeFetch),
+    { provider: "none", server: "", topic: "" },
+    { maxAcuLimit: 2, archiveOnEnd: true, isRemoteOn: () => remote.on, events: ev, lookupTitle: async () => null });
+  const hooks = new HookRuntime(ev, q, tm, new HandleMap(), () => remote, 400);
+  const wsDir = join(dir, "ws-g");
+  const adir = hooks["attach"].dirFor("sess-gate");
+  const p = join(adir, "gated.png");
+  writeFileSync(p, PNG);
+  const old = new Date(Date.now() - 3000);
+  utimesSync(p, old, old);
+  await hooks.handle("PostToolUse", { session_id: "sess-gate", tool_name: "write", tool_input: {} }, wsDir);
+  await Bun.sleep(300);
+  expect(calls.filter((u) => u.endsWith("/attachments")).length).toBe(0);
+  remote.on = true;
+  await hooks.handle("PostToolUse", { session_id: "sess-gate", tool_name: "write", tool_input: {} }, wsDir);
+  await Bun.sleep(400);
+  expect(calls.filter((u) => u.endsWith("/attachments")).length).toBe(1);
 });
 
 test("403 disables uploads for the process", async () => {

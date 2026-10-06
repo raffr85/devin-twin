@@ -40,7 +40,10 @@ export class ArtifactWatcher {
   private stateFile: string;
   private state: AttachState = {};
 
-  constructor(private root = attachRoot()) {
+  constructor(
+    private root = attachRoot(),
+    private settleMs = 1500,
+  ) {
     this.stateFile = join(root, "state.json");
     try {
       if (existsSync(this.stateFile))
@@ -86,6 +89,7 @@ export class ArtifactWatcher {
       if (st.isSymbolicLink() || !st.isFile()) continue;
       const mtime = st.mtimeMs;
       if (mtime > maxMtime) maxMtime = mtime;
+      if (Date.now() - mtime < this.settleMs) continue; // still being written
       const mime = MIME[extname(name).toLowerCase()];
       if (!mime) continue;
       if (st.size === 0 || st.size > MAX_BYTES) continue;
