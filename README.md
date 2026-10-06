@@ -14,6 +14,8 @@ Local sessions are also locked by the client that owns them: a second process ca
 
 The Devin v3 API can create tiny `lite`-mode Cloud sessions and attach MCP servers to them. Put those together: a local bridge watches your sessions through hooks and ACP, and a Cloud "twin" session — visible in the iOS app — narrates each local session and calls back into the bridge over authenticated MCP.
 
+Worth being honest up front: Devin Cloud already offers macOS VMs with Xcode, Simulator and Computer Use — if you're starting fresh, use that. The twin is for sessions that must run on your own machine: existing Desktop sessions, local state, local credentials, code that can't leave.
+
 ## What you get
 
 | | |
