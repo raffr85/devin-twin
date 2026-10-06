@@ -58,6 +58,10 @@ export type CliConfig = {
     maxAcuLimit: number;
     archiveOnEnd: boolean;
   };
+  capture: {
+    simulator: boolean;
+    android: boolean;
+  };
 };
 
 export function ensureDirs(): void {
@@ -71,6 +75,7 @@ export function readConfig(): CliConfig | null {
   const tunnel = (raw.tunnel ?? {}) as Record<string, unknown>;
   const push = (raw.push ?? {}) as Record<string, unknown>;
   const twin = (raw.twin ?? {}) as Record<string, unknown>;
+  const capture = (raw.capture ?? {}) as Record<string, unknown>;
   return {
     port: Number(raw.port ?? 8787),
     hookPort: Number(raw.hook_port ?? 8788),
@@ -92,6 +97,10 @@ export function readConfig(): CliConfig | null {
       maxAcuLimit: Number(twin.max_acu_limit ?? 2),
       archiveOnEnd: (twin.archive_on_end as boolean) ?? true,
     },
+    capture: {
+      simulator: (capture.simulator as boolean) ?? true,
+      android: (capture.android as boolean) ?? true,
+    },
   };
 }
 
@@ -104,6 +113,7 @@ export function writeConfig(cfg: CliConfig): void {
   if (cfg.tunnel.publicUrl) out += `public_url = ${JSON.stringify(cfg.tunnel.publicUrl)}\n`;
   out += `\n[push]\nprovider = "${cfg.push.provider}"\nserver = "${cfg.push.server}"\ntopic = "${cfg.push.topic}"\n`;
   out += `\n[twin]\nmax_acu_limit = ${cfg.twin.maxAcuLimit}\narchive_on_end = ${cfg.twin.archiveOnEnd}\n`;
+  out += `\n[capture]\nsimulator = ${cfg.capture.simulator}\nandroid = ${cfg.capture.android}\n`;
   writeFileSync(CONFIG_FILE, out);
 }
 

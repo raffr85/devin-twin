@@ -143,6 +143,10 @@ The topic is a secret — anyone who knows it can read your pushes (and they con
 - **Continuation**: `mac_continue_session` spawns a new bridge-owned session in the same cwd, seeded with a compact summary of the original's history plus your instruction. It narrates into the same twin; pushes get "(continuation)".
 - **Artifacts**: with remote mode on, the SessionStart hook tells the agent about `~/.local/share/devin-twin/attach/<sessionId>/`. Files saved there (png/jpg/gif/webp/txt/log/md, ≤5 MB, ≤4 per scan) are uploaded as attachments on the next twin trigger; the watch runs on PostToolUse, on Stop, and every ~5s while a Stop hold is parked. Text artifacts are secret-redacted before upload; symlinks and path escapes are rejected.
 
+### Automatic screen capture (iOS Simulator / Android)
+
+With remote mode on the bridge also screenshots devices itself — no agent involvement: after any tool call that touches `xcrun simctl`/`xcodebuild`/`fastlane`/`devicectl`/`xctrace` (or a cwd containing `*.xcodeproj`/`*.xcworkspace`), and similarly `adb`/`gradlew`/`emulator` (or `build.gradle`/`settings.gradle` in cwd), it runs `xcrun simctl io booted screenshot` / `adb exec-out screencap -p`, drops the PNG into the session's attach dir, and pushes it with the `screen: <device>` headline. A final shot is taken at Stop if the session touched a device during the turn. Identical frames are deduplicated (sha256) and captures are throttled to one per 10s per session. Disable per platform with `[capture] simulator = false` / `android = false`; `twin status` reports availability. Every image goes to Devin Cloud as a session attachment — keep remote mode off if that's a concern.
+
 Leave absent mode off when you're at the desk — held turns keep Desktop showing "working" and route permission prompts through your phone.
 
 ## The twin session

@@ -27,6 +27,7 @@ function mkCfg(over: Record<string, unknown> = {}) {
     tunnel: { provider: "quick" as const },
     push: { provider: "none" as const, server: "https://ntfy.sh", topic: "" },
     twin: { maxAcuLimit: 2, archiveOnEnd: true },
+    capture: { simulator: true, android: true },
     ...over,
   };
 }

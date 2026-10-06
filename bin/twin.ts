@@ -117,6 +117,7 @@ async function cmdSetup(args: string[]): Promise<void> {
     },
     push: prev?.push ?? { provider: "none", server: "https://ntfy.sh", topic: "" },
     twin: prev?.twin ?? { maxAcuLimit: 2, archiveOnEnd: true },
+    capture: prev?.capture ?? { simulator: true, android: true },
   };
 
   if (provider === "cloudflare") {
@@ -350,6 +351,8 @@ async function cmdStart(): Promise<void> {
       BRIDGE_HOOK_PORT: String(cfg.hookPort),
       BRIDGE_QUEUE_TTL_MIN: String(cfg.queueTtlMin),
       BRIDGE_TURN_TTL_MIN: String(cfg.turnTtlMin),
+      TWIN_CAPTURE_SIMULATOR: String(cfg.capture.simulator),
+      TWIN_CAPTURE_ANDROID: String(cfg.capture.android),
     },
   });
   proc.unref();
@@ -469,6 +472,14 @@ async function cmdStatus(json: boolean): Promise<void> {
     console.log(`bridge:  ${bridgeAlive ? `pid ${bridgePid} :${cfg?.port} ${hz?.ok ? "healthy" : "unhealthy"}` : "not running"}`);
     console.log(`tunnel:  ${cfg?.tunnel.provider ?? "?"}${tunnelPid ? ` pid ${tunnelPid} ${tunnelAlive ? "alive" : "dead"}` : ""} ${state.publicUrl ?? ""}`);
     console.log(`remote:  ${remote.on ? `on (cap ${remote.maxHoldMinutes}m)` : "off"}  queued: ${queuedInstructions}`);
+    if (cfg) {
+      const { SimulatorCapture, AndroidCapture } = await import("../src/capture.ts");
+      const simOk = cfg.capture.simulator && (await new SimulatorCapture().available());
+      const andOk = cfg.capture.android && (await new AndroidCapture().available());
+      console.log(
+        `capture: simulator ${simOk ? "✓" : "✗"} android ${andOk ? "✓" : "✗"}${cfg.capture.simulator || cfg.capture.android ? "" : " (disabled)"}`,
+      );
+    }
     const activeTwins = Object.values(twins).filter((t) => !t.archived).length;
     console.log(`twins:   ${activeTwins} active / ${Object.keys(twins).length} total`);
     console.log(`last req: ${report.lastRequestAt ?? "-"}`);

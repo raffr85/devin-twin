@@ -45,7 +45,16 @@ const twin = new TwinManager(
   },
 );
 
-const hooks = new HookRuntime(events, queue, twin, handles, () => readRemote(), 540_000, cfg.queueTtlMs);
+const hooks = new HookRuntime(
+  events,
+  queue,
+  twin,
+  handles,
+  () => readRemote(),
+  540_000,
+  cfg.queueTtlMs,
+  { simulator: cfg.captureSimulator, android: cfg.captureAndroid },
+);
 hooks.drainOnEnd = async (sid, cwd, text) => {
   const r = await pool.sendMessage(sid, cwd, text);
   if (!r.ok) throw new Error(r.reason);
