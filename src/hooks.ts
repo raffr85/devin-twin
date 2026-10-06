@@ -9,7 +9,6 @@ import { addPendingHookPermission, drop } from "./pending.ts";
 import { audit } from "./audit.ts";
 import { pidAlive } from "./cli/state.ts";
 import { ArtifactWatcher } from "./attach.ts";
-import { SimulatorCapture, AndroidCapture, type CaptureBaseLike } from "./capture.ts";
 
 export type RemoteReader = () => { on: boolean; maxHoldMinutes: number };
 
@@ -44,10 +43,6 @@ export class HookRuntime {
   private holdDeadline = new Map<string, number>();
   private turnFired = new Set<string>();
   private attach = new ArtifactWatcher();
-  private sim: CaptureBaseLike = new SimulatorCapture();
-  private andr: CaptureBaseLike = new AndroidCapture();
-  private touchedSim = new Set<string>();
-  private touchedAndroid = new Set<string>();
   drainOnEnd:
     | ((sid: string, cwd: string, text: string) => Promise<void>)
     | null = null;
@@ -62,10 +57,6 @@ export class HookRuntime {
     private remote: RemoteReader,
     private permHoldMs = 540_000,
     private queueTtlMs = 3_600_000,
-    private captureCfg: { simulator: boolean; android: boolean } = {
-      simulator: true,
-      android: true,
-    },
   ) {}
 
   isHolding(sid: string): boolean {
@@ -91,7 +82,6 @@ export class HookRuntime {
   private async pushArtifacts(
     sid: string,
     meta: { title?: string | null; cwd?: string | null; handle: string },
-    headline?: string,
   ): Promise<void> {
     if (!this.remote().on) return; // nothing leaves the Mac unless absent mode is on
     try {
@@ -116,40 +106,11 @@ export class HookRuntime {
       this.attach.markUploaded(sid, done);
       if (urls.length) {
         const first = done[0]!;
-        const head =
-          headline ??
-          `${first.mime.startsWith("image/") ? "new image" : "new file"}: ${first.name}`;
-        await this.twin.trigger(sid, head, "artifact", meta, urls, firstImage);
+        const headline = `${first.mime.startsWith("image/") ? "new image" : "new file"}: ${first.name}`;
+        await this.twin.trigger(sid, headline, "artifact", meta, urls, firstImage);
       }
     } catch (e) {
       audit({ event: "attach_scan_failed", error: String(e) });
-    }
-  }
-
-  /** After a simulator/android touch, take a screen shot and push it. */
-  private async maybeCapture(
-    sid: string,
-    meta: { title?: string | null; cwd?: string | null; handle: string },
-    touched: { sim: boolean; android: boolean },
-  ): Promise<void> {
-    if (!this.remote().on) return;
-    const cap =
-      touched.sim && this.captureCfg.simulator && (await this.sim.available())
-        ? { c: this.sim, fallback: "simulator" }
-        : touched.android && this.captureCfg.android && (await this.andr.available())
-          ? { c: this.andr, fallback: "android" }
-          : null;
-    if (!cap) return;
-    try {
-      const shot = await cap.c.shot(sid);
-      if (shot)
-        await this.pushArtifacts(
-          sid,
-          meta,
-          `screen: ${cap.c.deviceName() ?? cap.fallback}`,
-        );
-    } catch (e) {
-      audit({ event: "capture_failed", session: meta.handle, error: String(e) });
     }
   }
 
@@ -214,12 +175,9 @@ export class HookRuntime {
           hookSpecificOutput: {
             hookEventName: "SessionStart",
             additionalContext:
-              `Screenshots of a booted iOS Simulator or Android device are captured automatically ` +
-              `after simulator-related commands — no action needed; if the task involves the iOS ` +
-              `app and no simulator is booted, boot one with \`xcrun simctl boot <device>\`. ` +
-              `To show the user other images or a short log on their phone, save it into ${dir} ` +
+              `To show the user an image or a short log on their phone, save it into ${dir} ` +
               `(png/jpg/gif/webp/txt/log/md, ≤5 MB). Files there are uploaded to the user's Devin ` +
-              `twin session automatically.`,
+              `twin session automatically. Example: xcrun simctl io booted screenshot ${dir}/login.png`,
           },
         };
       }
@@ -241,20 +199,12 @@ export class HookRuntime {
       }
       case "PostToolUse": {
         const resp = (body.tool_response ?? {}) as Record<string, unknown>;
-        const toolName = String(body.tool_name ?? "");
         this.events.append(sid, "tool", {
           tool_name: body.tool_name,
-          summary: summary(toolName, body.tool_input),
+          summary: summary(String(body.tool_name ?? ""), body.tool_input),
           success: resp.success ?? null,
         });
-        const touched = {
-          sim: SimulatorCapture.touchesSimulator(toolName, body.tool_input, cwd),
-          android: AndroidCapture.touchesAndroid(toolName, body.tool_input, cwd),
-        };
-        if (touched.sim) this.touchedSim.add(sid);
-        if (touched.android) this.touchedAndroid.add(sid);
-        if (touched.sim || touched.android) void this.maybeCapture(sid, meta, touched);
-        else void this.pushArtifacts(sid, meta);
+        void this.pushArtifacts(sid, meta);
         return {};
       }
       case "PermissionRequest": {
@@ -318,18 +268,9 @@ export class HookRuntime {
         // absent mode: hold the turn open until an instruction arrives,
         // remote turns off, or the hard cap is reached; re-arm under the
         // curl timeout by blocking with a no-op just before ~840s.
-        // announce the hold start once per real turn; if the session touched a
-        // simulator/device, grab one final screen so it rides with "turno concluído"
-        if (!stopActive) {
-          const touched = {
-            sim: this.touchedSim.has(sid),
-            android: this.touchedAndroid.has(sid),
-          };
-          if (touched.sim || touched.android)
-            await this.maybeCapture(sid, meta, touched);
-          else void this.pushArtifacts(sid, meta);
-          endTurn("turno concluído · aguardando suas instruções");
-        } else void this.pushArtifacts(sid, meta);
+        // announce the hold start once per real turn
+        void this.pushArtifacts(sid, meta);
+        if (!stopActive) endTurn("turno concluído · aguardando suas instruções");
         this.holds.add(sid);
         if (!this.holdDeadline.has(sid))
           this.holdDeadline.set(sid, Date.now() + r.maxHoldMinutes * 60_000);
@@ -383,8 +324,6 @@ export class HookRuntime {
         }
       }
       case "SessionEnd": {
-        this.touchedSim.delete(sid);
-        this.touchedAndroid.delete(sid);
         this.events.append(sid, "session_end", { reason: body.reason });
         void this.twin.trigger(sid, "sessão encerrada", "session_end", meta);
         if (this.queue.size(sid) > 0) void this.drainAfterSessionEnd(sid, cwd);

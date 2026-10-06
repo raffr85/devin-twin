@@ -13,8 +13,6 @@ export type Config = {
   hookToken: string | null;
   hookPort: number;
   queueTtlMs: number;
-  captureSimulator: boolean;
-  captureAndroid: boolean;
 };
 
 function readApiKeyFromCredentials(): string | null {
@@ -91,7 +89,5 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     hookToken,
     hookPort,
     queueTtlMs: queueTtlMin * 60_000,
-    captureSimulator: env.TWIN_CAPTURE_SIMULATOR !== "false",
-    captureAndroid: env.TWIN_CAPTURE_ANDROID !== "false",
   };
 }
