@@ -177,7 +177,7 @@ export class HookRuntime {
             additionalContext:
               `To show the user an image or a short log on their phone, save it into ${dir} ` +
               `(png/jpg/gif/webp/txt/log/md, ≤5 MB). Files there are uploaded to the user's Devin ` +
-              `twin session automatically. Example: xcrun simctl io booted screenshot ${dir}/login.png`,
+              `twin session automatically.`,
           },
         };
       }
